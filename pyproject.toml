@@ -1,0 +1,17 @@
+[project]
+name = "auth-flow"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg>=0.31.0",
+    "fastapi>=0.128.4",
+    "google-auth>=2.48.0",
+    "loguru>=0.7.3",
+    "pydantic-settings>=2.12.0",
+    "python-jose>=3.5.0",
+    "requests>=2.32.5",
+    "sqlalchemy>=2.0.46",
+    "uvicorn>=0.40.0",
+]
