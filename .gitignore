@@ -1,0 +1,17 @@
+.venv
+.env
+uploads/
+node_modules/
+backend/venv/
+backend/uploads/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/dist-ssr/
+frontend/*.local
+frontend/logs/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+*__pycache__/

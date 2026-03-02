@@ -1,0 +1,59 @@
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.config import settings
+from app.routers import auth, events, media, revisions, reference
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+upload_dir = Path(settings.LOCAL_UPLOAD_DIR)
+upload_dir.mkdir(parents=True, exist_ok=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting up")
+    yield
+    logger.info("Shutting down")
+
+
+app = FastAPI(
+    title="Event Flow API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount(
+    settings.SERVE_FILES_URL_PREFIX,
+    StaticFiles(directory=str(upload_dir)),
+    name="uploads",
+)
+
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(events.router, prefix="/api/events", tags=["Events"])
+app.include_router(media.router, prefix="/api/events/{event_id}/media", tags=["Media"])
+app.include_router(revisions.router, prefix="/api/events/{event_id}/revisions", tags=["Revisions"])
+app.include_router(reference.router, prefix="/api/reference", tags=["Reference"])
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
