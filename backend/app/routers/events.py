@@ -13,12 +13,11 @@ router = APIRouter()
 
 def _to_out(event: Event) -> EventOut:
     ver = event.current_media_version
-    # For drafts (ver==0) show staging files; otherwise show current version
     target_ver = ver if ver > 0 else 0
     files = [
         MediaFileSummary.model_validate(m)
         for m in event.media_items
-        if m.media_version == target_ver
+        if target_ver in m.media_versions
     ]
     return EventOut(
         id=event.id,
@@ -102,6 +101,16 @@ async def create_draft_from_event(
 ):
     draft = await event_service.create_draft_from_event(db, event_id, user.id)
     return _to_out(draft)
+
+
+@router.patch("/{event_id}/toggle-status", response_model=EventOut)
+async def toggle_event_status(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    event = await event_service.toggle_event_status(db, event_id)
+    return _to_out(event)
 
 
 @router.delete("/{event_id}", status_code=204)

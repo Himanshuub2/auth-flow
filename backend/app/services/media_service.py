@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import uuid
 
@@ -35,55 +34,48 @@ def _validate_file_size(file_type: FileType, size: int, filename: str) -> None:
         )
 
 
-async def _compute_hash(file: UploadFile) -> str:
-    sha = hashlib.sha256()
-    while chunk := await file.read(1024 * 64):
-        sha.update(chunk)
-    await file.seek(0)
-    return sha.hexdigest()
-
-
 async def upload_files(
     db: AsyncSession, event_id: int, files: list[UploadFile]
 ) -> list[EventMediaItem]:
-    """Upload files to storage with media_version=0 (staging)."""
+    """Upload files. One row per unique filename per event."""
     storage = get_storage()
     saved: list[EventMediaItem] = []
 
     for file in files:
-        file_type = _classify_file(file.filename or "unknown")
+        filename = file.filename or "unknown"
+        file_type = _classify_file(filename)
 
         content = await file.read()
         file_size = len(content)
         await file.seek(0)
 
-        _validate_file_size(file_type, file_size, file.filename or "unknown")
-        file_hash = await _compute_hash(file)
+        _validate_file_size(file_type, file_size, filename)
 
-        existing = await db.execute(
+        existing = (await db.execute(
             select(EventMediaItem).where(
                 EventMediaItem.event_id == event_id,
-                EventMediaItem.file_hash == file_hash,
+                EventMediaItem.original_filename == filename,
             ).limit(1)
-        )
-        if existing.scalar_one_or_none():
+        )).scalar_one_or_none()
+
+        if existing:
+            if 0 not in existing.media_versions:
+                existing.media_versions = [*existing.media_versions, 0]
+            saved.append(existing)
             continue
 
-        ext = (file.filename or "file").rsplit(".", 1)[-1].lower()
+        ext = filename.rsplit(".", 1)[-1].lower()
         dest_path = f"{event_id}/{uuid.uuid4().hex}.{ext}"
         await storage.save(file, dest_path)
 
         item = EventMediaItem(
             event_id=event_id,
-            media_version=0,
+            media_versions=[0],
             file_type=file_type,
             file_url=storage.get_url(dest_path),
-            file_hash=file_hash,
-            caption=None,
-            description=None,
             sort_order=len(saved),
             file_size_bytes=file_size,
-            original_filename=file.filename or "unknown",
+            original_filename=filename,
         )
         db.add(item)
         saved.append(item)
@@ -96,16 +88,18 @@ async def upload_files(
 async def get_media_items(
     db: AsyncSession, event_id: int, version: int | None = None
 ) -> list[EventMediaItem]:
-    print(version)
     if version is None:
         event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
         if not event:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
         version = event.current_media_version
-    print(version,event.current_media_version,event.current_revision_number,event.id)
+
     result = await db.execute(
         select(EventMediaItem)
-        .where(EventMediaItem.event_id == event_id, EventMediaItem.media_version == version)
+        .where(
+            EventMediaItem.event_id == event_id,
+            EventMediaItem.media_versions.any(version),
+        )
         .order_by(EventMediaItem.sort_order)
     )
     return list(result.scalars().all())

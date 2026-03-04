@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { listEvents, deleteEvent } from "../../api";
+import { listEvents, deleteEvent, toggleEventStatus } from "../../api";
 import type { EventData, EventStatus } from "../../types";
 import RevisionBrowser from "./RevisionBrowser";
 
@@ -32,8 +32,15 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
   }, [page, statusFilter, refreshKey]);
 
   const handleDelete = async (id: number) => {
-    if (!confirm("Archive this event?")) return;
+    if (!confirm("Deactivate this event?")) return;
     await deleteEvent(id);
+    loadEvents();
+  };
+
+  const handleToggle = async (ev: EventData) => {
+    const action = ev.status === "ACTIVE" ? "deactivate" : "activate";
+    if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} this event?`)) return;
+    await toggleEventStatus(ev.id);
     loadEvents();
   };
 
@@ -41,7 +48,8 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
     const colors: Record<EventStatus, { bg: string; text: string }> = {
       DRAFT: { bg: "#fff3e0", text: "#e65100" },
       PUBLISHED: { bg: "#e8f5e9", text: "#2e7d32" },
-      ARCHIVED: { bg: "#f5f5f5", text: "#757575" },
+      ACTIVE: { bg: "#e3f2fd", text: "#1565c0" },
+      INACTIVE: { bg: "#f5f5f5", text: "#757575" },
     };
     const c = colors[s];
     return (
@@ -66,7 +74,8 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
             <option value="">All</option>
             <option value="DRAFT">Draft</option>
             <option value="PUBLISHED">Published</option>
-            <option value="ARCHIVED">Archived</option>
+            <option value="ACTIVE">Active</option>
+            <option value="INACTIVE">Inactive</option>
           </select>
         </div>
         <span style={{ color: "#888", fontSize: 13 }}>{total} event(s)</span>
@@ -115,7 +124,21 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
                   <div style={{ display: "flex", gap: 6 }}>
                     <button onClick={() => onEdit(ev)} style={actionBtn}>Edit</button>
                     <button onClick={() => setRevisionEventId(ev.id)} style={actionBtn}>History</button>
-                    <button onClick={() => handleDelete(ev.id)} style={{ ...actionBtn, color: "#d32f2f" }}>Archive</button>
+                    {(ev.status === "ACTIVE" || ev.status === "INACTIVE") ? (
+                      <button
+                        onClick={() => handleToggle(ev)}
+                        style={{
+                          ...actionBtn,
+                          color: ev.status === "INACTIVE" ? "#2e7d32" : "#d32f2f",
+                        }}
+                      >
+                        {ev.status === "INACTIVE" ? "Activate" : "Deactivate"}
+                      </button>
+                    ) : (
+                      <button onClick={() => handleDelete(ev.id)} style={{ ...actionBtn, color: "#d32f2f" }}>
+                        Deactivate
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>

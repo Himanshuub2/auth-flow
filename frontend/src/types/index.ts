@@ -1,4 +1,4 @@
-export type EventStatus = "DRAFT" | "PUBLISHED" | "ARCHIVED";
+export type EventStatus = "DRAFT" | "PUBLISHED" | "ACTIVE" | "INACTIVE";
 export type ApplicabilityType = "ALL" | "DIVISION" | "EMPLOYEE";
 export type FileType = "IMAGE" | "VIDEO";
 
@@ -25,7 +25,7 @@ export interface MediaFileSummary {
   original_filename: string;
   file_type: FileType;
   file_url: string;
-  media_version: number;
+  media_versions: number[];
 }
 
 export interface Revision {
@@ -75,10 +75,9 @@ export interface EventListResponse {
 export interface MediaItem {
   id: number;
   event_id: number;
-  media_version: number;
+  media_versions: number[];
   file_type: FileType;
   file_url: string;
-  file_hash: string;
   thumbnail_url: string | null;
   caption: string | null;
   description: string | null;
@@ -112,6 +111,7 @@ export interface SaveEventPayload {
   applicability_type: string;
   applicability_refs?: Record<string, number[]> | null;
   status: string;
+  selected_filenames?: string[];
 }
 
 export interface WizardFormState {

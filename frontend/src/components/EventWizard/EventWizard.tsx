@@ -80,6 +80,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         applicability_type: form.applicability_type,
         applicability_refs: form.applicability_type === "ALL" ? null : form.applicability_refs,
         status: publish ? "PUBLISHED" : "DRAFT",
+        selected_filenames: form.existingMedia.map((m) => m.original_filename),
       };
 
       const files = form.files.length ? form.files : undefined;
@@ -154,8 +155,6 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
               Back
             </button>
           )}
-          {JSON.stringify(form)}
-          {JSON.stringify(editEvent)}
           <button onClick={() => handleSave(false)} style={btnDraft} disabled={saving}>
             {saving ? "Saving..." : "Save as Draft"}
           </button>

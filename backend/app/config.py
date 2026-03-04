@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = "postgresql+asyncpg://eventflow:eventflow_secret@localhost:5432/eventflow"
+    DATABASE_URL: str = "postgresql+asyncpg://authuser:authpass@localhost:5432/auth-flow"
     JWT_SECRET_KEY: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_MINUTES: int = 1440

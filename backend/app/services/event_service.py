@@ -1,11 +1,11 @@
 import logging
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, select, update as sa_update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.event import Event, EventRevision, EventStatus, ApplicabilityType
+from app.models.event import Event, EventRevision, EventStatus
 from app.models.event_media_item import EventMediaItem
 from app.schemas.event import EventSavePayload
 from app.services.media_service import upload_files
@@ -28,7 +28,6 @@ async def save_event(
         db.add(event)
         await db.flush()
 
-    # Saving a PUBLISHED event as DRAFT → create/reuse a linked draft instead
     if event.status == EventStatus.PUBLISHED and payload.status == EventStatus.DRAFT:
         event = await _get_or_create_draft(db, event, user_id)
 
@@ -40,8 +39,14 @@ async def save_event(
     event.applicability_type = payload.applicability_type
     event.applicability_refs = payload.applicability_refs
 
+    uploaded_names: list[str] = []
     if files:
-        await upload_files(db, event.id, files)
+        uploaded = await upload_files(db, event.id, files)
+        uploaded_names = [f.original_filename for f in uploaded]
+
+    if payload.selected_filenames is not None:
+        all_names = list(dict.fromkeys([*payload.selected_filenames, *uploaded_names]))
+        await _sync_staging(db, event, all_names)
 
     if payload.status == EventStatus.PUBLISHED:
         if event.draft_parent_id is not None:
@@ -89,8 +94,24 @@ async def list_events(
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
     event = await get_event(db, event_id)
-    event.status = EventStatus.ARCHIVED
+    event.status = EventStatus.INACTIVE
     await db.flush()
+
+
+async def toggle_event_status(db: AsyncSession, event_id: int) -> Event:
+    event = await get_event(db, event_id)
+    if event.status == EventStatus.ACTIVE:
+        event.status = EventStatus.INACTIVE
+    elif event.status == EventStatus.INACTIVE:
+        event.status = EventStatus.ACTIVE
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only ACTIVE/INACTIVE events can be toggled",
+        )
+    await db.flush()
+    await db.refresh(event)
+    return event
 
 
 async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_id: int) -> Event:
@@ -103,7 +124,6 @@ async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_i
 
 
 async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: int) -> Event:
-    """Return existing draft for this published event, or create a new one."""
     existing = (await db.execute(
         select(Event).where(
             Event.draft_parent_id == parent.id,
@@ -129,31 +149,54 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: int) ->
     )
     db.add(draft)
     await db.flush()
-    await _copy_media(db, parent.id, parent.current_media_version, 0, target_event_id=draft.id)
+
+    parent_files = await _get_files_for_version(db, parent.id, parent.current_media_version)
+    for f in parent_files:
+        db.add(EventMediaItem(
+            event_id=draft.id,
+            media_versions=[0],
+            file_type=f.file_type,
+            file_url=f.file_url,
+            thumbnail_url=f.thumbnail_url,
+            caption=f.caption,
+            description=f.description,
+            sort_order=f.sort_order,
+            file_size_bytes=f.file_size_bytes,
+            original_filename=f.original_filename,
+        ))
     await db.flush()
     return draft
 
 
-# ── publish ──────────────────────────────────────────────────────────────
+# -- publish ---------------------------------------------------------------
 
 async def _publish_event(db: AsyncSession, event: Event) -> None:
-    """First publish or re-publish of a standalone event."""
     if event.current_media_version == 0:
         event.current_media_version = 1
         event.current_revision_number = 0
-        # Move staging files (version 0) to version 1
-        await db.execute(
-            sa_update(EventMediaItem)
-            .where(EventMediaItem.event_id == event.id, EventMediaItem.media_version == 0)
-            .values(media_version=1)
-        )
+        new_ver = 1
     else:
         if await _version_should_bump(db, event):
             event.current_media_version += 1
             event.current_revision_number = 0
-            await _copy_media(db, event.id, 0, event.current_media_version)
         else:
             event.current_revision_number += 1
+        new_ver = event.current_media_version
+
+    staging = await _get_files_for_version(db, event.id, 0)
+    for f in staging:
+        clean = [v for v in f.media_versions if v != 0]
+        if new_ver not in clean:
+            clean.append(new_ver)
+        f.media_versions = clean
+
+    all_files = (await db.execute(
+        select(EventMediaItem).where(EventMediaItem.event_id == event.id)
+    )).scalars().all()
+    staging_ids = {f.id for f in staging}
+    for f in all_files:
+        if f.id not in staging_ids and 0 in f.media_versions:
+            f.media_versions = [v for v in f.media_versions if v != 0]
 
     db.add(EventRevision(
         event_id=event.id,
@@ -170,7 +213,6 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
 
 
 async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
-    """Publish a draft: archive the parent, promote the draft with full history."""
     parent = await get_event(db, draft.draft_parent_id)
 
     last_rev = _find_latest_revision(parent)
@@ -178,28 +220,36 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
         draft.event_name != last_rev.event_name
         or draft.sub_event_name != last_rev.sub_event_name
     ) if last_rev else True
-    files_changed = await _files_differ(db, draft.id, 0, parent.current_media_version, parent.id)
+    files_changed = await _files_differ_between(db, draft.id, 0, parent.id, parent.current_media_version)
 
     if name_changed or files_changed:
         draft.current_media_version = parent.current_media_version + 1
         draft.current_revision_number = 0
-        await _copy_media(db, draft.id, 0, draft.current_media_version)
     else:
         draft.current_media_version = parent.current_media_version
         draft.current_revision_number = parent.current_revision_number + 1
 
-    # Move parent's revisions and media to draft so it has full history
+    new_ver = draft.current_media_version
+
+    staging = await _get_files_for_version(db, draft.id, 0)
+    for f in staging:
+        clean = [v for v in f.media_versions if v != 0]
+        if new_ver not in clean:
+            clean.append(new_ver)
+        f.media_versions = clean
+
     for rev in parent.revisions:
         rev.event_id = draft.id
-    await db.execute(
-        sa_update(EventMediaItem)
-        .where(EventMediaItem.event_id == parent.id)
-        .values(event_id=draft.id)
-    )
+
+    parent_files = (await db.execute(
+        select(EventMediaItem).where(EventMediaItem.event_id == parent.id)
+    )).scalars().all()
+    for f in parent_files:
+        f.event_id = draft.id
 
     db.add(EventRevision(
         event_id=draft.id,
-        media_version=draft.current_media_version,
+        media_version=new_ver,
         revision_number=draft.current_revision_number,
         event_name=draft.event_name,
         sub_event_name=draft.sub_event_name,
@@ -209,7 +259,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
         created_by=draft.created_by,
     ))
 
-    parent.status = EventStatus.ARCHIVED
+    parent.status = EventStatus.INACTIVE
     draft.status = EventStatus.PUBLISHED
     draft.draft_parent_id = None
 
@@ -218,7 +268,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
     return draft
 
 
-# ── helpers ──────────────────────────────────────────────────────────────
+# -- helpers ---------------------------------------------------------------
 
 def _find_latest_revision(event: Event) -> EventRevision | None:
     if not event.revisions:
@@ -230,56 +280,61 @@ async def _version_should_bump(db: AsyncSession, event: Event) -> bool:
     last_rev = _find_latest_revision(event)
     if not last_rev:
         return True
-    name_changed = (
-        event.event_name != last_rev.event_name
-        or event.sub_event_name != last_rev.sub_event_name
-    )
-    if name_changed:
+    if (event.event_name != last_rev.event_name
+            or event.sub_event_name != last_rev.sub_event_name):
         return True
-    return await _files_differ(db, event.id, 0, event.current_media_version)
+    return await _files_differ_between(db, event.id, 0, event.id, event.current_media_version)
 
 
-async def _get_hashes(db: AsyncSession, event_id: int, media_version: int) -> set[str]:
+async def _get_files_for_version(
+    db: AsyncSession, event_id: int, version: int
+) -> list[EventMediaItem]:
     result = await db.execute(
-        select(EventMediaItem.file_hash).where(
+        select(EventMediaItem).where(
             EventMediaItem.event_id == event_id,
-            EventMediaItem.media_version == media_version,
+            EventMediaItem.media_versions.any(version),
+        ).order_by(EventMediaItem.sort_order)
+    )
+    return list(result.scalars().all())
+
+
+async def _get_names_for_version(
+    db: AsyncSession, event_id: int, version: int
+) -> set[str]:
+    result = await db.execute(
+        select(EventMediaItem.original_filename).where(
+            EventMediaItem.event_id == event_id,
+            EventMediaItem.media_versions.any(version),
         )
     )
     return set(result.scalars().all())
 
 
-async def _files_differ(
-    db: AsyncSession, event_id_a: int, version_a: int, version_b: int,
-    event_id_b: int | None = None,
+async def _files_differ_between(
+    db: AsyncSession,
+    event_id_a: int, version_a: int,
+    event_id_b: int, version_b: int,
 ) -> bool:
-    hashes_a = await _get_hashes(db, event_id_a, version_a)
-    hashes_b = await _get_hashes(db, event_id_b or event_id_a, version_b)
-    return hashes_a != hashes_b
+    names_a = await _get_names_for_version(db, event_id_a, version_a)
+    names_b = await _get_names_for_version(db, event_id_b, version_b)
+    return names_a != names_b
 
 
-async def _copy_media(
-    db: AsyncSession, source_event_id: int, source_version: int,
-    target_version: int, target_event_id: int | None = None,
+async def _sync_staging(
+    db: AsyncSession, event: Event, selected_names: list[str]
 ) -> None:
-    target_eid = target_event_id or source_event_id
-    result = await db.execute(
-        select(EventMediaItem).where(
-            EventMediaItem.event_id == source_event_id,
-            EventMediaItem.media_version == source_version,
-        ).order_by(EventMediaItem.sort_order)
-    )
-    for item in result.scalars().all():
-        db.add(EventMediaItem(
-            event_id=target_eid,
-            media_version=target_version,
-            file_type=item.file_type,
-            file_url=item.file_url,
-            file_hash=item.file_hash,
-            thumbnail_url=item.thumbnail_url,
-            caption=item.caption,
-            description=item.description,
-            sort_order=item.sort_order,
-            file_size_bytes=item.file_size_bytes,
-            original_filename=item.original_filename,
-        ))
+    """Make staging (version 0) match exactly what FE sent."""
+    desired = set(selected_names)
+
+    all_files = (await db.execute(
+        select(EventMediaItem).where(EventMediaItem.event_id == event.id)
+    )).scalars().all()
+
+    for f in all_files:
+        in_staging = 0 in f.media_versions
+        wanted = f.original_filename in desired
+
+        if wanted and not in_staging:
+            f.media_versions = [*f.media_versions, 0]
+        elif not wanted and in_staging:
+            f.media_versions = [v for v in f.media_versions if v != 0]

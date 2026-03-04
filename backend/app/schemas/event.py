@@ -15,6 +15,7 @@ class EventSavePayload(BaseModel):
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
     applicability_refs: dict | None = None
     status: EventStatus = EventStatus.DRAFT
+    selected_filenames: list[str] | None = None
 
 
 class MediaFileSummary(BaseModel):
@@ -22,7 +23,7 @@ class MediaFileSummary(BaseModel):
     original_filename: str
     file_type: FileType
     file_url: str
-    media_version: int
+    media_versions: list[int]
 
     model_config = {"from_attributes": True}
 

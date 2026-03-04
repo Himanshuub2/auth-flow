@@ -5,13 +5,16 @@ from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, Unique
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base
+from app.database import BaseEvents
+
+SCHEMA = "ecp_events"
 
 
 class EventStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     PUBLISHED = "PUBLISHED"
-    ARCHIVED = "ARCHIVED"
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
 
 
 class ApplicabilityType(str, enum.Enum):
@@ -20,7 +23,7 @@ class ApplicabilityType(str, enum.Enum):
     EMPLOYEE = "EMPLOYEE"
 
 
-class Event(Base):
+class Event(BaseEvents):
     __tablename__ = "events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -46,10 +49,10 @@ class Event(Base):
     applicability_refs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     draft_parent_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="SET NULL"), nullable=True
     )
 
-    created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey(f"{SCHEMA}.users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -68,16 +71,17 @@ class Event(Base):
     creator: Mapped["User"] = relationship(lazy="joined", foreign_keys=[created_by])
 
 
-class EventRevision(Base):
+class EventRevision(BaseEvents):
     """Immutable snapshot created only when an event is published."""
     __tablename__ = "event_revisions"
     __table_args__ = (
         UniqueConstraint("event_id", "media_version", "revision_number", name="uq_event_version_revision"),
+        {"schema": SCHEMA},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="CASCADE"), nullable=False
     )
     media_version: Mapped[int] = mapped_column(Integer, nullable=False)
     revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -88,7 +92,7 @@ class EventRevision(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
-    created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey(f"{SCHEMA}.users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

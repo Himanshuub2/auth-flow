@@ -8,10 +8,9 @@ from app.models.event_media_item import FileType
 class MediaItemOut(BaseModel):
     id: int
     event_id: int
-    media_version: int
+    media_versions: list[int]
     file_type: FileType
     file_url: str
-    file_hash: str
     thumbnail_url: str | None
     caption: str | None
     description: str | None

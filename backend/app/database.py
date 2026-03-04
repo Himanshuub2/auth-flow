@@ -13,6 +13,17 @@ class Base(DeclarativeBase):
     pass
 
 
+# Schema-specific bases — models inherit from these to avoid repeating __table_args__
+class BaseEvents(Base):
+    __abstract__ = True
+    __table_args__ = {"schema": "ecp_events"}
+
+
+class BaseDocuments(Base):
+    __abstract__ = True
+    __table_args__ = {"schema": "ecp_documents"}
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         try:

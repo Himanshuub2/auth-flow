@@ -1,10 +1,13 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database import Base
+from app.database import BaseEvents
+
+SCHEMA = "ecp_events"
 
 
 class FileType(str, enum.Enum):
@@ -12,21 +15,19 @@ class FileType(str, enum.Enum):
     VIDEO = "VIDEO"
 
 
-class EventMediaItem(Base):
+class EventMediaItem(BaseEvents):
     __tablename__ = "files"
-    __table_args__ = (
-        Index("ix_event_media_version", "event_id", "media_version"),
-    )
+    __table_args__ = ({"schema": SCHEMA},)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_id: Mapped[int] = mapped_column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False)
-    media_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_id: Mapped[int] = mapped_column(Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="CASCADE"), nullable=False)
+
+    media_versions: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False, default=list)
 
     file_type: Mapped[FileType] = mapped_column(
         Enum(FileType, name="file_type", create_constraint=True), nullable=False
     )
     file_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     thumbnail_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     caption: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -36,5 +37,4 @@ class EventMediaItem(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    # raise: prevents accidental lazy load — load explicitly when needed
     event: Mapped["Event"] = relationship(back_populates="media_items", lazy="raise")

@@ -51,6 +51,9 @@ export const createDraftFromEvent = (id: number) =>
 export const deleteEvent = (id: number) =>
   client.delete(`/events/${id}`);
 
+export const toggleEventStatus = (id: number) =>
+  client.patch<EventData>(`/events/${id}/toggle-status`);
+
 // ---- Media (read-only) ----
 export const getMedia = (eventId: number, version?: number) =>
   client.get<MediaItem[]>(`/events/${eventId}/media/`, { params: version ? { version } : {} });
