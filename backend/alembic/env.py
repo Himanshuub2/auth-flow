@@ -5,10 +5,9 @@ from alembic import context
 
 from app.config import settings
 from app.database import Base
-import app.models  # noqa: F401 — registers all models with Base.metadata
-from app.models.event import Event
-from app.models.user import User
-from app.models.event_media_item import EventMediaItem
+import app.models.events  # noqa: F401 — registers all models with Base.metadata
+from app.models.events import Event, EventMediaItem
+from app.models.events.user import User
 config = context.config
 
 if config.config_file_name is not None:

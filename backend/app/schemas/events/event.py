@@ -2,8 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from app.models.event import ApplicabilityType, EventStatus
-from app.models.event_media_item import FileType
+from app.models.events.event import ApplicabilityType, EventStatus
+from app.models.events.event_media_item import FileType
 
 
 class FileMetadataIn(BaseModel):

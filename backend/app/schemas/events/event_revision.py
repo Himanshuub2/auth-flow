@@ -1,5 +1,5 @@
-from app.schemas.event import RevisionOut
-from app.schemas.event_media import MediaItemOut
+from app.schemas.events.event import RevisionOut
+from app.schemas.events.event_media import MediaItemOut
 
 from pydantic import BaseModel
 

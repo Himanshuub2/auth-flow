@@ -6,9 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.event import Event
-from app.models.event_media_item import EventMediaItem, FileType
-from app.schemas.event import FileMetadataIn
+from app.models.events.event import Event
+from app.models.events.event_media_item import EventMediaItem, FileType
+from app.schemas.events.event import FileMetadataIn
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)

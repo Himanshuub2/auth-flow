@@ -6,7 +6,7 @@ import logging
 from sqlalchemy import select
 
 from app.database import async_session_factory
-from app.models.user import User
+from app.models.events.user import User
 from app.utils.security import hash_password
 
 logging.basicConfig(level=logging.INFO)

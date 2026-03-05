@@ -4,8 +4,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User
-from app.schemas.user import UserRegister
+from app.models.events.user import User
+from app.schemas.events.user import UserRegister
 from app.utils.security import hash_password, verify_password, create_access_token
 
 logger = logging.getLogger(__name__)

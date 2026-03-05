@@ -8,8 +8,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import auth, events, media, revisions, reference
-from app.schemas.comman import APIResponse
+from app.routers.events import auth, events, media, revisions, reference
+from app.schemas.events.comman import APIResponse
 
 logging.basicConfig(
     level=logging.INFO,

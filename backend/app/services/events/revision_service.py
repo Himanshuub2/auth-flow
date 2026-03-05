@@ -4,8 +4,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.event import Event, EventRevision
-from app.models.event_media_item import EventMediaItem
+from app.models.events.event import Event, EventRevision
+from app.models.events.event_media_item import EventMediaItem
 
 logger = logging.getLogger(__name__)
 

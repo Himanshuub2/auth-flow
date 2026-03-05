@@ -5,10 +5,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.event import Event, EventRevision, EventStatus
-from app.models.event_media_item import EventMediaItem
-from app.schemas.event import EventSavePayload, FileMetadataIn
-from app.services.media_service import upload_files
+from app.models.events.event import Event, EventRevision, EventStatus
+from app.models.events.event_media_item import EventMediaItem
+from app.schemas.events.event import EventSavePayload, FileMetadataIn
+from app.services.events.media_service import upload_files
 
 logger = logging.getLogger(__name__)
 

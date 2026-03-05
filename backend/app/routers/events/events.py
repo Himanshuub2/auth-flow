@@ -2,11 +2,11 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.event import Event, EventStatus
-from app.models.user import User
-from app.schemas.comman import APIResponse, APIResponsePaginated
-from app.schemas.event import EventOut, EventSavePayload, MediaFileSummary
-from app.services import event_service
+from app.models.events.event import Event, EventStatus
+from app.models.events.user import User
+from app.schemas.events.comman import APIResponse, APIResponsePaginated
+from app.schemas.events.event import EventOut, EventSavePayload, MediaFileSummary
+from app.services.events import event_service
 from app.utils.security import get_current_user
 
 router = APIRouter()

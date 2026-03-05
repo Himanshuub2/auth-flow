@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.user import User
-from app.schemas.comman import APIResponse
-from app.schemas.event_media import MediaItemOut
-from app.services import media_service
+from app.models.events.user import User
+from app.schemas.events.comman import APIResponse
+from app.schemas.events.event_media import MediaItemOut
+from app.services.events import media_service
 from app.utils.security import get_current_user
 
 router = APIRouter()
