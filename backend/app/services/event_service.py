@@ -3,11 +3,11 @@ import logging
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload
 
 from app.models.event import Event, EventRevision, EventStatus
 from app.models.event_media_item import EventMediaItem
-from app.schemas.event import EventSavePayload
+from app.schemas.event import EventSavePayload, FileMetadataIn
 from app.services.media_service import upload_files
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,15 @@ async def save_event(
     event_id: int | None = None,
     files: list[UploadFile] | None = None,
 ) -> Event:
+    """
+    Create or update an event. Uploads files to staging, syncs staging to
+    selected_filenames, then publishes or saves as draft.
+
+    Payload: EventSavePayload (event_name, status, selected_filenames, ...).
+    files: optional new uploads (added to staging; names merged with selected_filenames).
+
+    Returns: the saved Event (caller should flush/refresh if needed).
+    """
     if event_id:
         event = await get_event(db, event_id)
     else:
@@ -47,6 +56,9 @@ async def save_event(
     if payload.selected_filenames is not None:
         all_names = list(dict.fromkeys([*payload.selected_filenames, *uploaded_names]))
         await _sync_staging(db, event, all_names)
+
+    if payload.file_metadata:
+        await _apply_file_metadata(db, event.id, payload.file_metadata)
 
     if payload.status == EventStatus.PUBLISHED:
         if event.draft_parent_id is not None:
@@ -83,7 +95,7 @@ async def list_events(
 
     total = (await db.execute(count_query)).scalar() or 0
     query = (
-        query.options(selectinload(Event.media_items), selectinload(Event.creator))
+        query.options(joinedload(Event.creator))
         .order_by(Event.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -103,7 +115,7 @@ async def toggle_event_status(db: AsyncSession, event_id: int) -> Event:
     if event.status == EventStatus.ACTIVE:
         event.status = EventStatus.INACTIVE
     elif event.status == EventStatus.INACTIVE:
-        event.status = EventStatus.ACTIVE
+        event.status = EventStatus.PUBLISHED
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -271,12 +283,14 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
 # -- helpers ---------------------------------------------------------------
 
 def _find_latest_revision(event: Event) -> EventRevision | None:
+    """Return the revision with the highest (media_version, revision_number), or None."""
     if not event.revisions:
         return None
     return max(event.revisions, key=lambda r: (r.media_version, r.revision_number))
 
 
 async def _version_should_bump(db: AsyncSession, event: Event) -> bool:
+    """True if event name/sub_name changed or staging files differ from current version (so we need a new media version)."""
     last_rev = _find_latest_revision(event)
     if not last_rev:
         return True
@@ -289,6 +303,7 @@ async def _version_should_bump(db: AsyncSession, event: Event) -> bool:
 async def _get_files_for_version(
     db: AsyncSession, event_id: int, version: int
 ) -> list[EventMediaItem]:
+    """Return all file rows for this event that belong to the given version (version in media_versions)."""
     result = await db.execute(
         select(EventMediaItem).where(
             EventMediaItem.event_id == event_id,
@@ -301,6 +316,7 @@ async def _get_files_for_version(
 async def _get_names_for_version(
     db: AsyncSession, event_id: int, version: int
 ) -> set[str]:
+    """Return the set of original_filename for files in this event and version."""
     result = await db.execute(
         select(EventMediaItem.original_filename).where(
             EventMediaItem.event_id == event_id,
@@ -315,6 +331,7 @@ async def _files_differ_between(
     event_id_a: int, version_a: int,
     event_id_b: int, version_b: int,
 ) -> bool:
+    """True if the set of file names in (event_a, version_a) is different from (event_b, version_b)."""
     names_a = await _get_names_for_version(db, event_id_a, version_a)
     names_b = await _get_names_for_version(db, event_id_b, version_b)
     return names_a != names_b
@@ -323,7 +340,26 @@ async def _files_differ_between(
 async def _sync_staging(
     db: AsyncSession, event: Event, selected_names: list[str]
 ) -> None:
-    """Make staging (version 0) match exactly what FE sent."""
+    """
+    Make staging (version 0) match exactly what the frontend sent.
+
+    Staging is the draft set of files before publish. Each file row has
+    media_versions = [0] when it is in staging, and [1], [2], ... for
+    published versions.
+
+    Payload:
+        selected_names: list of original_filename strings the user chose
+        (existing files they kept + names of newly uploaded files).
+
+    What it does:
+        - If a file is in selected_names but not in staging → add 0 to its
+          media_versions (include it in staging).
+        - If a file is in staging but not in selected_names → remove 0 from
+          its media_versions (user removed it from this version).
+
+    Returns:
+        None. Updates file rows in place; caller must flush.
+    """
     desired = set(selected_names)
 
     all_files = (await db.execute(
@@ -338,3 +374,19 @@ async def _sync_staging(
             f.media_versions = [*f.media_versions, 0]
         elif not wanted and in_staging:
             f.media_versions = [v for v in f.media_versions if v != 0]
+
+
+async def _apply_file_metadata(
+    db: AsyncSession, event_id: int, file_metadata: list[FileMetadataIn]
+) -> None:
+    """Set caption, description, thumbnail_url on file rows by original_filename."""
+    by_name = {m.original_filename: m for m in file_metadata}
+    all_files = (await db.execute(
+        select(EventMediaItem).where(EventMediaItem.event_id == event_id)
+    )).scalars().all()
+    for f in all_files:
+        meta = by_name.get(f.original_filename)
+        if meta:
+            f.caption = meta.caption or None
+            f.description = meta.description or None
+            f.thumbnail_url = meta.thumbnail_url or None

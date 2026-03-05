@@ -25,7 +25,17 @@ export interface MediaFileSummary {
   original_filename: string;
   file_type: FileType;
   file_url: string;
+  thumbnail_url: string | null;
+  caption: string | null;
+  description: string | null;
   media_versions: number[];
+}
+
+export interface FileMetadataIn {
+  original_filename: string;
+  caption?: string | null;
+  description?: string | null;
+  thumbnail_url?: string | null;
 }
 
 export interface Revision {
@@ -66,7 +76,7 @@ export interface EventData {
 }
 
 export interface EventListResponse {
-  items: EventData[];
+  data: EventData[];
   total: number;
   page: number;
   page_size: number;
@@ -112,6 +122,13 @@ export interface SaveEventPayload {
   applicability_refs?: Record<string, number[]> | null;
   status: string;
   selected_filenames?: string[];
+  file_metadata?: FileMetadataIn[];
+}
+
+export interface FileMetadataEditable {
+  caption: string;
+  description: string;
+  thumbnail_url: string;
 }
 
 export interface WizardFormState {
@@ -124,4 +141,5 @@ export interface WizardFormState {
   applicability_refs: Record<string, number[]>;
   files: File[];
   existingMedia: MediaItem[];
+  fileMetadata: Record<string, FileMetadataEditable>;
 }

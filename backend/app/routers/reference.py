@@ -6,13 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.user import User
+from app.schemas.common import APIResponse
 from app.schemas.reference import DesignationOut, DivisionOut
 from app.utils.security import get_current_user
 
 router = APIRouter()
 
 
-@router.get("/divisions", response_model=list[DivisionOut])
+@router.get("/divisions", response_model=APIResponse)
 async def get_divisions(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -24,10 +25,16 @@ async def get_divisions(
         .order_by(User.division_cluster)
     )
     names = [row for row in result.scalars().all() if row]
-    return [DivisionOut(id=i + 1, name=n) for i, n in enumerate(names)]
+    divisions = [DivisionOut(id=i + 1, name=n) for i, n in enumerate(names)]
+    return APIResponse(
+        message="Divisions fetched successfully",
+        status_code=200,
+        status="success",
+        data=divisions,
+    )
 
 
-@router.get("/designations", response_model=list[DesignationOut])
+@router.get("/designations", response_model=APIResponse)
 async def get_designations(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -39,4 +46,10 @@ async def get_designations(
         .order_by(User.designation)
     )
     names = [row for row in result.scalars().all() if row]
-    return [DesignationOut(id=i + 1, name=n) for i, n in enumerate(names)]
+    designations = [DesignationOut(id=i + 1, name=n) for i, n in enumerate(names)]
+    return APIResponse(
+        message="Designations fetched successfully",
+        status_code=200,
+        status="success",
+        data=designations,
+    )

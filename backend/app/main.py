@@ -2,12 +2,14 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routers import auth, events, media, revisions, reference
+from app.schemas.common import APIResponse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,3 +59,34 @@ app.include_router(reference.router, prefix="/api/reference", tags=["Reference"]
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Return all HTTPExceptions in the standard APIResponse envelope.
+    """
+    payload = APIResponse(
+        message=str(exc.detail),
+        status_code=exc.status_code,
+        status="error",
+        data=None,
+        pagination=None,
+    )
+    return JSONResponse(status_code=exc.status_code, content=payload.model_dump())
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Fallback handler to ensure unexpected errors also use the same structure.
+    """
+    logger.exception("Unhandled exception", exc_info=exc)
+    payload = APIResponse(
+        message="Internal server error",
+        status_code=500,
+        status="error",
+        data=None,
+        pagination=None,
+    )
+    return JSONResponse(status_code=500, content=payload.model_dump())

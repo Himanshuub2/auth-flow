@@ -22,6 +22,7 @@ const emptyForm: WizardFormState = {
   applicability_refs: {},
   files: [],
   existingMedia: [],
+  fileMetadata: {},
 };
 
 interface Props {
@@ -47,6 +48,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         applicability_refs: editEvent.applicability_refs || {},
         files: [],
         existingMedia: [],
+        fileMetadata: {},
       };
     }
     return { ...emptyForm };
@@ -71,6 +73,21 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
     setError(null);
 
     try {
+      const file_metadata = [
+        ...form.existingMedia.map((m) => ({
+          original_filename: m.original_filename,
+          caption: m.caption ?? null,
+          description: m.description ?? null,
+          thumbnail_url: m.thumbnail_url ?? null,
+        })),
+        ...form.files.map((f) => ({
+          original_filename: f.name,
+          caption: form.fileMetadata[f.name]?.caption || null,
+          description: form.fileMetadata[f.name]?.description || null,
+          thumbnail_url: form.fileMetadata[f.name]?.thumbnail_url || null,
+        })),
+      ];
+
       const payload: SaveEventPayload = {
         event_name: form.event_name,
         sub_event_name: form.sub_event_name || null,
@@ -81,6 +98,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         applicability_refs: form.applicability_type === "ALL" ? null : form.applicability_refs,
         status: publish ? "PUBLISHED" : "DRAFT",
         selected_filenames: form.existingMedia.map((m) => m.original_filename),
+        file_metadata,
       };
 
       const files = form.files.length ? form.files : undefined;

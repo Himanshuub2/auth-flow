@@ -15,10 +15,11 @@ export default function RevisionBrowser({ eventId, onClose }: Props) {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    listRevisions(eventId).then((r) => {
-      setRevisions(r.data);
-      if (r.data.length > 0) {
-        const first = r.data[0];
+    listRevisions(eventId).then((r) => {  
+      const data = r.data;
+      setRevisions(data);
+      if (data.length > 0) {
+        const first = data[0];
         loadSnapshot(first.media_version, first.revision_number);
       }
     });

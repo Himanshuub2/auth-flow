@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.user import User
+from app.schemas.common import APIResponse
 from app.schemas.event import RevisionOut
 from app.schemas.event_media import MediaItemOut
 from app.schemas.event_revision import RevisionDetailOut
@@ -19,17 +20,22 @@ def _rev_to_out(rev) -> RevisionOut:
     return RevisionOut(**d)
 
 
-@router.get("/", response_model=list[RevisionOut])
+@router.get("/", response_model=APIResponse)
 async def list_revisions(
     event_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     revisions = await revision_service.list_revisions(db, event_id)
-    return [_rev_to_out(r) for r in revisions]
+    return APIResponse(
+        message="Revisions fetched successfully",
+        status_code=200,
+        status="success",
+        data=[_rev_to_out(r) for r in revisions],
+    )
 
 
-@router.get("/{media_version}/{revision_number}", response_model=RevisionDetailOut)
+@router.get("/{media_version}/{revision_number}", response_model=APIResponse)
 async def get_revision(
     event_id: int,
     media_version: int,
@@ -40,7 +46,12 @@ async def get_revision(
     revision, media_items = await revision_service.get_revision_snapshot(
         db, event_id, media_version, revision_number
     )
-    return RevisionDetailOut(
-        revision=_rev_to_out(revision),
-        media_items=[MediaItemOut.model_validate(m) for m in media_items],
+    return APIResponse(
+        message="Revision fetched successfully",
+        status_code=200,
+        status="success",
+        data=RevisionDetailOut(
+            revision=_rev_to_out(revision),
+            media_items=[MediaItemOut.model_validate(m) for m in media_items],
+        ),
     )
