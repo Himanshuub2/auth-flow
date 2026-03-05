@@ -20,8 +20,8 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
     setLoading(true);
     try {
       const res = await listEvents(page, 20, statusFilter || undefined);
-      setEvents(res.data.items);
-      setTotal(res.data.total);
+      setEvents(res.data.data ?? []);
+      setTotal(res.data.total ?? 0);
     } finally {
       setLoading(false);
     }

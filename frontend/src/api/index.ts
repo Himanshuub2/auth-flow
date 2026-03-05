@@ -4,7 +4,7 @@ import type {
   EventData,
   EventListResponse,
   SaveEventPayload,
-  Revision,
+  RevisionSummary,
   RevisionDetail,
   MediaItem,
   Division,
@@ -60,7 +60,7 @@ export const getMedia = (eventId: number, version?: number) =>
 
 // ---- Revisions ----
 export const listRevisions = (eventId: number) =>
-  client.get<Revision[]>(`/events/${eventId}/revisions/`);
+  client.get<RevisionSummary[]>(`/events/${eventId}/revisions/`);
 
 export const getRevisionSnapshot = (eventId: number, mediaVersion: number, revisionNumber: number) =>
   client.get<RevisionDetail>(`/events/${eventId}/revisions/${mediaVersion}/${revisionNumber}`);

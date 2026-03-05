@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listRevisions, getRevisionSnapshot } from "../../api";
-import type { Revision, RevisionDetail } from "../../types";
+import type { RevisionSummary, RevisionDetail } from "../../types";
 
 const BACKEND_URL = "http://localhost:8000";
 
@@ -10,15 +10,16 @@ interface Props {
 }
 
 export default function RevisionBrowser({ eventId, onClose }: Props) {
-  const [revisions, setRevisions] = useState<Revision[]>([]);
+  const [revisions, setRevisions] = useState<RevisionSummary[]>([]);
   const [selected, setSelected] = useState<RevisionDetail | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     listRevisions(eventId).then((r) => {
-      setRevisions(r.data);
-      if (r.data.length > 0) {
-        const first = r.data[0];
+      const list = r.data.data ?? [];
+      setRevisions(list);
+      if (list.length > 0) {
+        const first = list[0];
         loadSnapshot(first.media_version, first.revision_number);
       }
     });
@@ -27,7 +28,7 @@ export default function RevisionBrowser({ eventId, onClose }: Props) {
   const loadSnapshot = async (mediaVersion: number, revisionNumber: number) => {
     setLoading(true);
     const r = await getRevisionSnapshot(eventId, mediaVersion, revisionNumber);
-    setSelected(r.data);
+    setSelected(r.data.data ?? null);
     setLoading(false);
   };
 
@@ -67,7 +68,7 @@ export default function RevisionBrowser({ eventId, onClose }: Props) {
           >
             {revisions.map((r) => (
               <option key={r.version_display} value={r.version_display}>
-                v{r.version_display} — {r.event_name} — {new Date(r.created_at).toLocaleDateString()}
+                v{r.version_display} — {new Date(r.created_at).toLocaleDateString()}
               </option>
             ))}
           </select>

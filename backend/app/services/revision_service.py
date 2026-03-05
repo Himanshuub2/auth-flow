@@ -10,18 +10,35 @@ from app.models.event_media_item import EventMediaItem
 logger = logging.getLogger(__name__)
 
 
-async def list_revisions(db: AsyncSession, event_id: int) -> list[EventRevision]:
+async def list_revisions(db: AsyncSession, event_id: int):
+    """
+    List revisions for a given event.
+    Only fetches id, event_id, media_version, revision_number, created_at
+    to keep the query fast and the payload small.
+    :param db: The database session
+    :param event_id: The ID of the event
+    :return: A list of revisions
+    """
     result = await db.execute(
-        select(EventRevision)
+        select(
+            EventRevision.id,
+            EventRevision.event_id,
+            EventRevision.media_version,
+            EventRevision.revision_number,
+            EventRevision.created_at,
+        )
         .where(EventRevision.event_id == event_id)
-        .order_by(EventRevision.media_version.desc(), EventRevision.revision_number.desc())
+        .order_by(
+            EventRevision.media_version.desc(),
+            EventRevision.revision_number.desc(),
+        )
     )
-    revisions = list(result.scalars().all())
-    if not revisions:
+    rows = result.all()
+    if not rows:
         event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
         if not event:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
-    return revisions
+    return rows
 
 
 async def get_revision_snapshot(

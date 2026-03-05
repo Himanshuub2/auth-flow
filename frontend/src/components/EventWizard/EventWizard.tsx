@@ -4,13 +4,19 @@ import StepDetails from "./StepDetails";
 import StepFiles from "./StepFiles";
 import StepApplicability from "./StepApplicability";
 import { createEvent, updateEvent, getMedia } from "../../api";
-import type { WizardFormState, EventData, SaveEventPayload } from "../../types";
+import type { WizardFormState, EventData, SaveEventPayload, FileMetadataState } from "../../types";
 
 const STEPS = [
   { label: "Details" },
   { label: "Event Files" },
   { label: "Applicability" },
 ];
+
+const defaultFileMeta = (): FileMetadataState => ({
+  caption: "",
+  description: "",
+  thumbnailFile: null,
+});
 
 const emptyForm: WizardFormState = {
   event_name: "",
@@ -21,6 +27,7 @@ const emptyForm: WizardFormState = {
   applicability_type: "ALL",
   applicability_refs: {},
   files: [],
+  fileMetadata: {},
   existingMedia: [],
 };
 
@@ -46,6 +53,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         applicability_type: editEvent.applicability_type,
         applicability_refs: editEvent.applicability_refs || {},
         files: [],
+        fileMetadata: {},
         existingMedia: [],
       };
     }
@@ -55,12 +63,27 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
   useEffect(() => {
     if (editEvent) {
       getMedia(editEvent.id).then((r) => {
-        setForm((prev) => ({ ...prev, existingMedia: r.data }));
+        setForm((prev) => ({ ...prev, existingMedia: r.data.data ?? [] }));
       });
     }
   }, [editEvent]);
 
-  const patch = (p: Partial<WizardFormState>) => setForm((prev) => ({ ...prev, ...p }));
+  const patch = (p: Partial<WizardFormState>) => {
+    if (p.files !== undefined) {
+      const prevNames = new Set(form.files.map((f) => f.name));
+      const nextNames = new Set(p.files.map((f) => f.name));
+      const newNames = [...nextNames].filter((n) => !prevNames.has(n));
+      const removed = [...prevNames].filter((n) => !nextNames.has(n));
+      const fileMetadata = { ...form.fileMetadata };
+      newNames.forEach((n) => {
+        if (!fileMetadata[n]) fileMetadata[n] = defaultFileMeta();
+      });
+      removed.forEach((n) => delete fileMetadata[n]);
+      setForm((prev) => ({ ...prev, ...p, fileMetadata }));
+      return;
+    }
+    setForm((prev) => ({ ...prev, ...p }));
+  };
 
   const handleSave = async (publish: boolean) => {
     if (!form.event_name.trim()) {
@@ -71,6 +94,16 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
     setError(null);
 
     try {
+      const file_metadata = form.files.map((f) => {
+        const meta = form.fileMetadata[f.name] ?? defaultFileMeta();
+        return {
+          original_filename: f.name,
+          caption: meta.caption.trim() || null,
+          description: meta.description.trim() || null,
+          thumbnail_original_filename: meta.thumbnailFile?.name ?? null,
+        };
+      });
+      const existingNames = form.existingMedia.map((m) => m.original_filename);
       const payload: SaveEventPayload = {
         event_name: form.event_name,
         sub_event_name: form.sub_event_name || null,
@@ -80,16 +113,26 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         applicability_type: form.applicability_type,
         applicability_refs: form.applicability_type === "ALL" ? null : form.applicability_refs,
         status: publish ? "PUBLISHED" : "DRAFT",
-        selected_filenames: form.existingMedia.map((m) => m.original_filename),
+        selected_filenames: [...existingNames, ...form.files.map((f) => f.name)],
+        file_metadata: file_metadata.length ? file_metadata : undefined,
       };
 
-      const files = form.files.length ? form.files : undefined;
+      const mainFiles = form.files.length ? form.files : undefined;
+      const thumbnailFiles = form.files.flatMap((f) => {
+        const meta = form.fileMetadata[f.name];
+        return meta?.thumbnailFile ? [meta.thumbnailFile] : [];
+      });
+      const allFiles = mainFiles
+        ? thumbnailFiles.length
+          ? [...mainFiles, ...thumbnailFiles]
+          : mainFiles
+        : undefined;
 
       if (editEvent) {
-        await updateEvent(editEvent.id, payload, files);
+        await updateEvent(editEvent.id, payload, allFiles);
       } else {
-        const res = await createEvent(payload, files);
-        setEditEvent(res.data);
+        const res = await createEvent(payload, allFiles);
+        setEditEvent(res.data.data);
       }
 
       if(publish) onSaved();

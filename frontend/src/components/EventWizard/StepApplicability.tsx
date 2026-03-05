@@ -13,8 +13,8 @@ export default function StepApplicability({ form, onChange }: Props) {
   const [designations, setDesignations] = useState<Designation[]>([]);
 
   useEffect(() => {
-    getDivisions().then((r) => setDivisions(r.data));
-    getDesignations().then((r) => setDesignations(r.data));
+    getDivisions().then((r) => setDivisions(r.data.data ?? []));
+    getDesignations().then((r) => setDesignations(r.data.data ?? []));
   }, []);
 
   const setType = (type: ApplicabilityType) => {

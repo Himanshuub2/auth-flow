@@ -3,7 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.event import RevisionOut
+from app.schemas.comman import APIResponse
+from app.schemas.event import RevisionOut, RevisionListItemOut
 from app.schemas.event_media import MediaItemOut
 from app.schemas.event_revision import RevisionDetailOut
 from app.services import revision_service
@@ -19,17 +20,33 @@ def _rev_to_out(rev) -> RevisionOut:
     return RevisionOut(**d)
 
 
-@router.get("/", response_model=list[RevisionOut])
+def _rev_list_item_from_row(row) -> RevisionListItemOut:
+    """
+    Convert a lightweight DB row into the slim list item schema.
+    Expects the columns: id, event_id, media_version, revision_number, created_at.
+    """
+    return RevisionListItemOut(
+        id=row.id,
+        event_id=row.event_id,
+        media_version=row.media_version,
+        revision_number=row.revision_number,
+        version_display=f"{row.media_version}.{row.revision_number}",
+        created_at=row.created_at,
+    )
+
+
+@router.get("/", response_model=APIResponse)
 async def list_revisions(
     event_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    revisions = await revision_service.list_revisions(db, event_id)
-    return [_rev_to_out(r) for r in revisions]
+    rows = await revision_service.list_revisions(db, event_id)
+    data = [_rev_list_item_from_row(r) for r in rows]
+    return APIResponse(message="Revisions fetched", status_code=200, status="success", data=data)
 
 
-@router.get("/{media_version}/{revision_number}", response_model=RevisionDetailOut)
+@router.get("/{media_version}/{revision_number}", response_model=APIResponse)
 async def get_revision(
     event_id: int,
     media_version: int,
@@ -40,7 +57,8 @@ async def get_revision(
     revision, media_items = await revision_service.get_revision_snapshot(
         db, event_id, media_version, revision_number
     )
-    return RevisionDetailOut(
+    data = RevisionDetailOut(
         revision=_rev_to_out(revision),
         media_items=[MediaItemOut.model_validate(m) for m in media_items],
     )
+    return APIResponse(message="Revision fetched", status_code=200, status="success", data=data)

@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.event import Event, EventRevision, EventStatus
 from app.models.event_media_item import EventMediaItem
-from app.schemas.event import EventSavePayload
+from app.schemas.event import EventSavePayload, FileMetadataIn
 from app.services.media_service import upload_files
 
 logger = logging.getLogger(__name__)
@@ -41,12 +41,15 @@ async def save_event(
 
     uploaded_names: list[str] = []
     if files:
-        uploaded = await upload_files(db, event.id, files)
+        uploaded = await upload_files(db, event.id, files, payload.file_metadata)
         uploaded_names = [f.original_filename for f in uploaded]
 
     if payload.selected_filenames is not None:
         all_names = list(dict.fromkeys([*payload.selected_filenames, *uploaded_names]))
         await _sync_staging(db, event, all_names)
+
+    if payload.file_metadata:
+        await _apply_file_metadata(db, event.id, payload.file_metadata)
 
     if payload.status == EventStatus.PUBLISHED:
         if event.draft_parent_id is not None:
@@ -83,7 +86,7 @@ async def list_events(
 
     total = (await db.execute(count_query)).scalar() or 0
     query = (
-        query.options(selectinload(Event.media_items), selectinload(Event.creator))
+        query.options(selectinload(Event.creator))
         .order_by(Event.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -338,3 +341,22 @@ async def _sync_staging(
             f.media_versions = [*f.media_versions, 0]
         elif not wanted and in_staging:
             f.media_versions = [v for v in f.media_versions if v != 0]
+
+
+async def _apply_file_metadata(
+    db: AsyncSession, event_id: int, file_metadata: list[FileMetadataIn]
+) -> None:
+    """Update caption and description for existing media items."""
+    meta_by_name = {m.original_filename: m for m in file_metadata}
+    if not meta_by_name:
+        return
+    result = await db.execute(
+        select(EventMediaItem).where(EventMediaItem.event_id == event_id)
+    )
+    for item in result.scalars().all():
+        meta = meta_by_name.get(item.original_filename)
+        if not meta:
+            continue
+        item.caption = meta.caption
+        item.description = meta.description
+    logger.debug("Applied file_metadata for %d items on event %s", len(meta_by_name), event_id)

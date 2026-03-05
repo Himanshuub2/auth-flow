@@ -1,16 +1,29 @@
 import { useRef, type DragEvent, useState } from "react";
-import type { MediaItem } from "../../types";
+import type { MediaItem, FileMetadataState } from "../../types";
 
 interface FileUploaderProps {
   files: File[];
+  fileMetadata: Record<string, FileMetadataState>;
   existingMedia: MediaItem[];
   onFilesChange: (files: File[]) => void;
+  onFileMetadataChange: (filename: string, meta: FileMetadataState) => void;
   onRemoveExisting: (id: number) => void;
 }
 
 const BACKEND_URL = "http://localhost:8000";
 
-export default function FileUploader({ files, existingMedia, onFilesChange, onRemoveExisting }: FileUploaderProps) {
+function isVideo(file: File): boolean {
+  return file.type.startsWith("video/") || /\.(mp4|webm)$/i.test(file.name);
+}
+
+export default function FileUploader({
+  files,
+  fileMetadata,
+  existingMedia,
+  onFilesChange,
+  onFileMetadataChange,
+  onRemoveExisting,
+}: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
@@ -26,7 +39,19 @@ export default function FileUploader({ files, existingMedia, onFilesChange, onRe
   };
 
   const removeFile = (idx: number) => {
+    const f = files[idx];
+    if (f) {
+      const next = { ...fileMetadata };
+      delete next[f.name];
+    }
     onFilesChange(files.filter((_, i) => i !== idx));
+  };
+
+  const getMeta = (filename: string): FileMetadataState =>
+    fileMetadata[filename] ?? { caption: "", description: "", thumbnailFile: null };
+
+  const setMeta = (filename: string, patch: Partial<FileMetadataState>) => {
+    onFileMetadataChange(filename, { ...getMeta(filename), ...patch });
   };
 
   return (
@@ -68,7 +93,7 @@ export default function FileUploader({ files, existingMedia, onFilesChange, onRe
           <h4 style={{ margin: "0 0 8px" }}>Existing Files</h4>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {existingMedia.map((m) => (
-              <div key={m.id} style={{ position: "relative", width: 100, height: 80, border: "1px solid #ddd", borderRadius: 4, overflow: "hidden" }}>
+              <div key={m.id} style={{ position: "relative", width: 200, height: 80, border: "1px solid #ddd", borderRadius: 4, overflow: "hidden" ,flexDirection: "column"}}>
                 {m.file_type === "IMAGE" ? (
                   <img src={`${BACKEND_URL}${m.file_url}`} alt={m.original_filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 ) : (
@@ -94,28 +119,67 @@ export default function FileUploader({ files, existingMedia, onFilesChange, onRe
         </div>
       )}
 
-      {/* Newly selected files */}
       {files.length > 0 && (
         <div>
           <h4 style={{ margin: "0 0 8px" }}>New Files ({files.length})</h4>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {files.map((f, idx) => (
-              <div key={idx} style={{ position: "relative", width: 100, padding: 6, border: "1px solid #ddd", borderRadius: 4, fontSize: 11, wordBreak: "break-all" }}>
-                {f.name}
-                <button
-                  type="button"
-                  onClick={() => removeFile(idx)}
-                  style={{
-                    position: "absolute", top: 2, right: 2,
-                    background: "rgba(0,0,0,0.5)", color: "#fff",
-                    border: "none", borderRadius: "50%", width: 20, height: 20,
-                    cursor: "pointer", fontSize: 12, lineHeight: "20px", padding: 0,
-                  }}
-                >
-                  &times;
-                </button>
-              </div>
-            ))}
+            {files.map((f, idx) => {
+              const meta = getMeta(f.name);
+              const showThumb = isVideo(f);
+              return (
+                <div key={idx} style={{ border: "1px solid #ddd", borderRadius: 4, padding: 8, width: 260 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, wordBreak: "break-all" }}>{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeFile(idx)}
+                      style={{
+                        background: "rgba(0,0,0,0.5)", color: "#fff",
+                        border: "none", borderRadius: "50%", width: 20, height: 20,
+                        cursor: "pointer", fontSize: 12, lineHeight: "20px", padding: 0,
+                      }}
+                    >
+                      &times;
+                    </button>
+                  </div>
+                  <label style={{ display: "block", marginBottom: 4 }}>
+                    Caption
+                    <input
+                      type="text"
+                      value={meta.caption}
+                      onChange={(e) => setMeta(f.name, { caption: e.target.value })}
+                      placeholder="Caption"
+                      style={{ display: "block", width: "100%", marginTop: 2, padding: 4 }}
+                    />
+                  </label>
+                  <label style={{ display: "block", marginBottom: 4 }}>
+                    Description
+                    <input
+                      type="text"
+                      value={meta.description}
+                      onChange={(e) => setMeta(f.name, { description: e.target.value })}
+                      placeholder="Description"
+                      style={{ display: "block", width: "100%", marginTop: 2, padding: 4 }}
+                    />
+                  </label>
+                  {showThumb && (
+                    <label style={{ display: "block", marginBottom: 4 }}>
+                      Thumbnail (optional)
+                      <input
+                        type="file"
+                        accept="image/*"
+                        style={{ display: "block", marginTop: 2, fontSize: 11 }}
+                        onChange={(e) => {
+                          const thumb = e.target.files?.[0];
+                          setMeta(f.name, { thumbnailFile: thumb ?? null });
+                        }}
+                      />
+                      {meta.thumbnailFile && <span style={{ fontSize: 11, color: "#666" }}> {meta.thumbnailFile.name}</span>}
+                    </label>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

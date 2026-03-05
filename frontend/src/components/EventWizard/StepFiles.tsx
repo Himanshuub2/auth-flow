@@ -1,5 +1,5 @@
 import FileUploader from "../common/FileUploader";
-import type { WizardFormState } from "../../types";
+import type { WizardFormState, FileMetadataState } from "../../types";
 
 interface Props {
   form: WizardFormState;
@@ -12,8 +12,14 @@ export default function StepFiles({ form, onChange }: Props) {
       <h3 style={{ marginTop: 0 }}>Upload Attachments</h3>
       <FileUploader
         files={form.files}
+        fileMetadata={form.fileMetadata}
         existingMedia={form.existingMedia}
         onFilesChange={(files) => onChange({ files })}
+        onFileMetadataChange={(filename, meta) =>
+          onChange({
+            fileMetadata: { ...form.fileMetadata, [filename]: meta },
+          })
+        }
         onRemoveExisting={(id) =>
           onChange({ existingMedia: form.existingMedia.filter((m) => m.id !== id) })
         }
