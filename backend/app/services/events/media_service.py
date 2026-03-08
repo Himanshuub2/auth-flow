@@ -155,7 +155,7 @@ async def get_media_items(
         select(EventMediaItem)
         .where(
             EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.any(version),
+            EventMediaItem.media_versions.contains([version]),
         )
         .order_by(EventMediaItem.sort_order)
     )

@@ -4,6 +4,8 @@ uploads/
 node_modules/
 backend/venv/
 backend/uploads/
+backend/*.db
+backend/event_flow.db
 frontend/node_modules/
 frontend/dist/
 frontend/build/

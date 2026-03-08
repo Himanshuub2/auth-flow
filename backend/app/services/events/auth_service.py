@@ -18,10 +18,12 @@ async def register_user(db: AsyncSession, data: UserRegister) -> tuple[User, str
 
     user = User(
         email=data.email,
-        password_hash=hash_password(data.password),
         full_name=data.full_name,
         division_cluster=data.division_cluster,
         designation=data.designation,
+        policy_hub_admin=False,
+        knowledge_hub_admin=False,
+        is_admin=False,
     )
     db.add(user)
     await db.flush()
@@ -34,7 +36,7 @@ async def register_user(db: AsyncSession, data: UserRegister) -> tuple[User, str
 async def login_user(db: AsyncSession, email: str, password: str) -> tuple[User, str]:
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user or not verify_password(password, user.password_hash):
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
     token = create_access_token(user.id)    

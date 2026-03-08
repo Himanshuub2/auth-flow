@@ -5,6 +5,12 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://authuser:authpass@localhost:5432/auth-flow"
+    # Set to sqlite+aiosqlite:///./event_flow.db for local/testing; switch back to postgres for cloud.
+
+    @property
+    def is_sqlite(self) -> bool:
+        return "sqlite" in self.DATABASE_URL
+
     JWT_SECRET_KEY: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_MINUTES: int = 1440
@@ -31,6 +37,10 @@ class Settings(BaseSettings):
     # Azure Blob Storage (used when STORAGE_BACKEND=azure)
     AZURE_STORAGE_CONNECTION_STRING: str = ""
     AZURE_CONTAINER_NAME: str = "uploads"
+
+    # Testing: skip auth and use default user (set TESTING_SKIP_AUTH=true in .env)
+    TESTING_SKIP_AUTH: bool = False
+    TESTING_DEFAULT_USER_EMAIL: str = "divyanshu@test.com"
 
     class Config:
         env_file = ".env"

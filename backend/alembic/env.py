@@ -17,8 +17,11 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-# Alembic needs a sync driver — swap asyncpg for psycopg2
-sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
+# Alembic needs a sync driver: SQLite stays sync; PostgreSQL swap asyncpg -> psycopg2
+if "sqlite" in settings.DATABASE_URL:
+    sync_url = settings.DATABASE_URL.replace("sqlite+aiosqlite", "sqlite")
+else:
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
 
 
 def run_migrations_offline() -> None:

@@ -118,7 +118,7 @@ async def get_document_files(
         select(DocumentFile)
         .where(
             DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.any(version),
+            DocumentFile.media_versions.contains([version]),
         )
         .order_by(DocumentFile.sort_order)
     )

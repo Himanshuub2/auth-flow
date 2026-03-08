@@ -2,12 +2,11 @@ from sqlalchemy import ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import BaseDocuments
-
-SCHEMA = "documents"
+from app.db_utils import documents_table, fk_documents
 
 
 class Legislation(BaseDocuments):
-    __tablename__ = "legislation"
+    __tablename__ = documents_table("legislation")
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
@@ -18,11 +17,11 @@ class Legislation(BaseDocuments):
 
 
 class SubLegislation(BaseDocuments):
-    __tablename__ = "sub_legislation"
+    __tablename__ = documents_table("sub_legislation")
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     legislation_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey(f"{SCHEMA}.legislation.id", ondelete="CASCADE"), nullable=False,
+        Integer, ForeignKey(fk_documents("legislation"), ondelete="CASCADE"), nullable=False,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
 

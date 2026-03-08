@@ -23,6 +23,7 @@ async def get_document_types(
     user: User = Depends(get_current_user),
 ):
     allowed = get_allowed_types_for_user(user)
+    print(allowed,user.policy_hub_admin,user.knowledge_hub_admin,user.is_admin,user.email,'--------++++++++++++++++')
     data = [
         DocumentTypeOut(value=DOCUMENT_TYPE_LABELS[t], label=DOCUMENT_TYPE_LABELS[t])
         for t in allowed

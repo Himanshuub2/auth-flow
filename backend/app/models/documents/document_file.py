@@ -2,12 +2,15 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, func
-from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import BaseDocuments
-
-SCHEMA = "documents"
+from app.db_utils import (
+    documents_table,
+    fk_documents,
+    media_versions_type,
+    schema_documents,
+)
 
 
 class DocumentFileType(str, enum.Enum):
@@ -16,18 +19,18 @@ class DocumentFileType(str, enum.Enum):
 
 
 class DocumentFile(BaseDocuments):
-    __tablename__ = "files"
-    __table_args__ = ({"schema": SCHEMA},)
+    __tablename__ = documents_table("files")
+    __table_args__ = ({"schema": schema_documents()},)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     document_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey(f"{SCHEMA}.documents.id", ondelete="CASCADE"), nullable=False,
+        Integer, ForeignKey(fk_documents("documents"), ondelete="CASCADE"), nullable=False,
     )
 
-    media_versions: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False, default=list)
+    media_versions: Mapped[list[int]] = mapped_column(media_versions_type(), nullable=False, default=list)
 
     file_type: Mapped[DocumentFileType] = mapped_column(
-        Enum(DocumentFileType, name="doc_file_type", schema=SCHEMA, create_constraint=True),
+        Enum(DocumentFileType, name="doc_file_type", schema=schema_documents(), create_constraint=True),
         nullable=False,
     )
     file_url: Mapped[str] = mapped_column(String(500), nullable=False)

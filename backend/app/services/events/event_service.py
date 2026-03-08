@@ -123,7 +123,7 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         )
         .where(
             EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.any(target_ver),
+            EventMediaItem.media_versions.contains([target_ver]),
         )
         .order_by(EventMediaItem.sort_order)
     )
@@ -429,7 +429,7 @@ async def _get_files_for_version(
     result = await db.execute(
         select(EventMediaItem).where(
             EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.any(version),
+            EventMediaItem.media_versions.contains([version]),
         ).order_by(EventMediaItem.sort_order)
     )
     return list(result.scalars().all())
@@ -441,7 +441,7 @@ async def _get_names_for_version(
     result = await db.execute(
         select(EventMediaItem.original_filename).where(
             EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.any(version),
+            EventMediaItem.media_versions.contains([version]),
         )
     )
     return set(result.scalars().all())

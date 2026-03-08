@@ -192,7 +192,7 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         )
         .where(
             DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.any(target_ver),
+            DocumentFile.media_versions.contains([target_ver]),
         )
         .order_by(DocumentFile.sort_order)
     )
@@ -446,7 +446,7 @@ async def get_revision_snapshot(
         select(DocumentFile)
         .where(
             DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.any(media_version),
+            DocumentFile.media_versions.contains([media_version]),
         )
         .order_by(DocumentFile.sort_order)
     )
@@ -681,7 +681,7 @@ async def _get_files_for_version(
     result = await db.execute(
         select(DocumentFile).where(
             DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.any(version),
+            DocumentFile.media_versions.contains([version]),
         ).order_by(DocumentFile.sort_order)
     )
     return list(result.scalars().all())
@@ -693,7 +693,7 @@ async def _get_names_for_version(
     result = await db.execute(
         select(DocumentFile.original_filename).where(
             DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.any(version),
+            DocumentFile.media_versions.contains([version]),
         )
     )
     return set(result.scalars().all())

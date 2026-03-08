@@ -2,12 +2,15 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import BaseEvents
-
-SCHEMA = "events"
+from app.db_utils import (
+    events_table,
+    fk_events,
+    media_versions_type,
+    schema_events,
+)
 
 
 class FileType(str, enum.Enum):
@@ -16,16 +19,18 @@ class FileType(str, enum.Enum):
 
 
 class EventMediaItem(BaseEvents):
-    __tablename__ = "files"
-    __table_args__ = ({"schema": SCHEMA},)
+    __tablename__ = events_table("files")
+    __table_args__ = ({"schema": schema_events()},)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_id: Mapped[int] = mapped_column(Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="CASCADE"), nullable=False)
+    event_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey(fk_events("events"), ondelete="CASCADE"), nullable=False
+    )
 
-    media_versions: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False, default=list)
+    media_versions: Mapped[list[int]] = mapped_column(media_versions_type(), nullable=False, default=list)
 
     file_type: Mapped[FileType] = mapped_column(
-        Enum(FileType, name="file_type", schema=SCHEMA, create_constraint=True), nullable=False
+        Enum(FileType, name="file_type", schema=schema_events(), create_constraint=True), nullable=False
     )
     file_url: Mapped[str] = mapped_column(String(500), nullable=False)
     thumbnail_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
