@@ -90,7 +90,6 @@ DOCUMENT_TYPE_ALLOWED_EXTENSIONS: dict[DocumentType, frozenset[str]] = {
 
 class DocumentStatus(str, enum.Enum):
     DRAFT = "DRAFT"
-    PUBLISHED = "PUBLISHED"
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
 

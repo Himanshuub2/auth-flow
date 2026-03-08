@@ -72,28 +72,23 @@ async def save_document(
     is_new = document_id is None
 
     if is_new:
-        # FAQ special case: only one active FAQ allowed, create draft from existing
-        if payload.document_type == DocumentType.FAQ and payload.status != DocumentStatus.DRAFT:
-            existing_faq = await _get_active_faq(db)
-            if existing_faq is not None:
-                doc = await _get_or_create_draft(db, existing_faq, user.id)
-            else:
-                doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
-                db.add(doc)
-                await db.flush()
-        else:
-            # Brand new document - no relation with any record
-            doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
-            db.add(doc)
-            await db.flush()
+        # FAQ: only one ACTIVE FAQ allowed
+        if payload.document_type == DocumentType.FAQ and payload.status == DocumentStatus.ACTIVE:
+            existing = await _get_active_faq(db, exclude_id=None)
+            if existing is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Active FAQ already exists",
+                )
+        doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
+        db.add(doc)
+        await db.flush()
     else:
         doc = await get_document(db, document_id)
 
-        if doc.status == DocumentStatus.PUBLISHED and payload.status == DocumentStatus.DRAFT:
-            # Edit published → save as draft → create new draft entry linked to parent
+        if doc.status == DocumentStatus.ACTIVE and payload.status == DocumentStatus.DRAFT:
             doc = await _get_or_create_draft(db, doc, user.id)
-        elif doc.status == DocumentStatus.PUBLISHED and payload.status == DocumentStatus.PUBLISHED:
-            # Re-publishing a published document directly: require change_remarks
+        elif doc.status == DocumentStatus.ACTIVE and payload.status == DocumentStatus.ACTIVE:
             if doc.replaces_document_id is None and (not payload.change_remarks or not payload.change_remarks.strip()):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -127,12 +122,19 @@ async def save_document(
         await _sync_staging(db, doc, all_names)
 
     staging_files = await _get_files_for_version(db, doc.id, 0)
-    if payload.status == DocumentStatus.PUBLISHED:
+    if payload.status == DocumentStatus.ACTIVE:
         validate_file_count(len(staging_files))
+        # FAQ: only one ACTIVE FAQ allowed (for update path: activating this doc)
+        if doc.document_type == DocumentType.FAQ:
+            existing = await _get_active_faq(db, exclude_id=doc.id)
+            if existing is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Active FAQ already exists",
+                )
 
-    if payload.status == DocumentStatus.PUBLISHED:
+    if payload.status == DocumentStatus.ACTIVE:
         if doc.replaces_document_id is not None:
-            # Publishing a draft record → deactivate the parent
             doc = await _publish_draft(db, doc)
         else:
             await _publish_document(db, doc)
@@ -281,8 +283,13 @@ async def deactivate_document(db: AsyncSession, document_id: int, deactivate_rem
     await db.flush()
 
 
-async def toggle_document_status(db: AsyncSession, document_id: int) -> Document:
+async def toggle_document_status(db: AsyncSession, user: User, document_id: int) -> Document:
+    await _check_type_permission(user, doc.document_type)
     doc = await get_document(db, document_id)
+    if doc.document_type == DocumentType.FAQ:
+        existing = (await db.execute(select(Document).where(Document.document_type == DocumentType.FAQ, Document.status == DocumentStatus.ACTIVE).limit(1))).scalar_one_or_none()
+        if existing:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Active FAQ already exists")
     if doc.status == DocumentStatus.ACTIVE:
         doc.status = DocumentStatus.INACTIVE
     elif doc.status == DocumentStatus.INACTIVE:
@@ -299,10 +306,10 @@ async def toggle_document_status(db: AsyncSession, document_id: int) -> Document
 
 async def create_draft_from_document(db: AsyncSession, parent_id: int, user_id: int) -> Document:
     parent = await get_document(db, parent_id)
-    if parent.status != DocumentStatus.PUBLISHED:
+    if parent.status != DocumentStatus.ACTIVE:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Can only create drafts from published documents",
+            detail="Can only create drafts from active documents",
         )
     draft = await _get_or_create_draft(db, parent, user_id)
     await db.refresh(draft)
@@ -322,7 +329,7 @@ async def get_linked_options(
         select(Document.id, Document.name)
         .where(
             Document.document_type == document_type,
-            Document.status.in_([DocumentStatus.PUBLISHED, DocumentStatus.ACTIVE]),
+            Document.status == DocumentStatus.ACTIVE,
         )
     )
     if exclude_id is not None:
@@ -442,13 +449,15 @@ async def get_revision_snapshot(
 
 
 
-async def _get_active_faq(db: AsyncSession) -> Document | None:
-    result = await db.execute(
-        select(Document).where(
-            Document.document_type == DocumentType.FAQ,
-            Document.status.in_([DocumentStatus.PUBLISHED, DocumentStatus.ACTIVE]),
-        ).limit(1)
+async def _get_active_faq(db: AsyncSession, exclude_id: int | None = None) -> Document | None:
+    """Return the active FAQ document if any. Optionally exclude a document id (e.g. current doc being activated)."""
+    q = select(Document).where(
+        Document.document_type == DocumentType.FAQ,
+        Document.status == DocumentStatus.ACTIVE,
     )
+    if exclude_id is not None:
+        q = q.where(Document.id != exclude_id)
+    result = await db.execute(q.limit(1))
     return result.scalar_one_or_none()
 
 
@@ -482,10 +491,10 @@ async def _validate_linked_ids(
                 detail=f"Linked document {lid} not found",
             )
         row = found[lid]
-        if row.status not in (DocumentStatus.PUBLISHED, DocumentStatus.ACTIVE):
+        if row.status != DocumentStatus.ACTIVE:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Linked document {lid} must be published or active",
+                detail=f"Linked document {lid} must be active",
             )
 
 
@@ -577,7 +586,7 @@ async def _publish_document(db: AsyncSession, doc: Document) -> None:
         applicability_refs=doc.applicability_refs,
         created_by=doc.created_by,
     ))
-    doc.status = DocumentStatus.PUBLISHED
+    doc.status = DocumentStatus.ACTIVE
 
 
 async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
@@ -636,7 +645,7 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
     ))
 
     parent.status = DocumentStatus.INACTIVE
-    draft.status = DocumentStatus.PUBLISHED
+    draft.status = DocumentStatus.ACTIVE
     draft.replaces_document_id = None
 
     await db.flush()

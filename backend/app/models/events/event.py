@@ -12,7 +12,6 @@ SCHEMA = "events"
 
 class EventStatus(str, enum.Enum):
     DRAFT = "DRAFT"
-    PUBLISHED = "PUBLISHED"
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
 

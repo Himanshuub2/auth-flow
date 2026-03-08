@@ -48,7 +48,6 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
   const statusBadge = (s: EventStatus) => {
     const colors: Record<EventStatus, { bg: string; text: string }> = {
       DRAFT: { bg: "#fff3e0", text: "#e65100" },
-      PUBLISHED: { bg: "#e8f5e9", text: "#2e7d32" },
       ACTIVE: { bg: "#e3f2fd", text: "#1565c0" },
       INACTIVE: { bg: "#f5f5f5", text: "#757575" },
     };
@@ -74,7 +73,6 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
           >
             <option value="">All</option>
             <option value="DRAFT">Draft</option>
-            <option value="PUBLISHED">Published</option>
             <option value="ACTIVE">Active</option>
             <option value="INACTIVE">Inactive</option>
           </select>

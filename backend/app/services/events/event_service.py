@@ -32,15 +32,15 @@ async def save_event(
     else:
         event = await get_event(db, event_id)
 
-        if event.status == EventStatus.PUBLISHED and payload.status == EventStatus.DRAFT:
-            # Edit published → save as draft → creates a new draft entry linked to parent
+        if event.status == EventStatus.ACTIVE and payload.status == EventStatus.DRAFT:
+            # Edit active → save as draft → creates a new draft entry linked to parent
             event = await _get_or_create_draft(db, event, user_id)
-        elif event.status == EventStatus.PUBLISHED and payload.status == EventStatus.PUBLISHED:
+        elif event.status == EventStatus.ACTIVE and payload.status == EventStatus.ACTIVE:
             # Re-publishing a published event directly: require change_remarks
             if not payload.change_remarks or not payload.change_remarks.strip():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="change_remarks is required when publishing an edit",
+                    detail="change_remarks is required when activating an edit",
                 )
 
     event.event_name = payload.event_name
@@ -64,7 +64,7 @@ async def save_event(
     if payload.file_metadata:
         await _apply_file_metadata(db, event.id, payload.file_metadata)
 
-    if payload.status == EventStatus.PUBLISHED:
+    if payload.status == EventStatus.ACTIVE:
         if event.replaces_document_id is not None:
             # Publishing a draft record → deactivate the parent
             event = await _publish_draft(db, event)
@@ -251,8 +251,8 @@ async def toggle_event_status(db: AsyncSession, event_id: int) -> Event:
 
 async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_id: int) -> Event:
     parent = await get_event(db, parent_event_id)
-    if parent.status != EventStatus.PUBLISHED:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Can only create drafts from published events")
+    if parent.status != EventStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Can only create drafts from active events")
     draft = await _get_or_create_draft(db, parent, user_id)
     await db.refresh(draft)
     return draft
@@ -345,7 +345,7 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
         change_remarks=event.change_remarks,
         created_by=event.created_by,
     ))
-    event.status = EventStatus.PUBLISHED
+    event.status = EventStatus.ACTIVE
 
 
 async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
@@ -397,7 +397,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
     ))
 
     parent.status = EventStatus.INACTIVE
-    draft.status = EventStatus.PUBLISHED
+    draft.status = EventStatus.ACTIVE
     draft.replaces_document_id = None
 
     await db.flush()

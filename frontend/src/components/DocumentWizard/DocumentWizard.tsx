@@ -171,14 +171,14 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
     if (!form.name.trim()) { setError("Name is required"); return; }
     if (!form.document_type) { setError("Document type is required"); return; }
     if (form.tags.length === 0) { setError("At least one tag is required"); return; }
-    if (editDoc?.status === "PUBLISHED" && !form.change_remarks.trim() && status === "PUBLISHED") { setError("Change remarks required for editing"); return; }
+    if (editDoc?.status === "ACTIVE" && !form.change_remarks.trim() && status === "ACTIVE") { setError("Change remarks required for editing"); return; }
 
     const keptExisting = (editDoc?.files ?? []).filter((f) => !removedExistingIds.includes(f.id));
     const existingFilenames = keptExisting.map((f) => f.original_filename);
     const newFilenames = files.map((f) => f.name);
     const allFilenames = [...new Set([...existingFilenames, ...newFilenames])];
 
-    if (status === "PUBLISHED" && allFilenames.length === 0 && files.length === 0) {
+    if (status === "ACTIVE" && allFilenames.length === 0 && files.length === 0) {
       setError("At least 1 file required to publish");
       return;
     }
@@ -211,7 +211,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         if (saved && saved.id !== editDoc.id && setEditDoc) {
           setEditDoc(saved);
         }
-        if (status === "PUBLISHED") onSaved();
+        if (status === "ACTIVE") onSaved();
       } else {
         const res = await createDocument(payload, files.length ? files : undefined);
         const body = res.data as any;
@@ -219,7 +219,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         if (saved && setEditDoc) {
           setEditDoc(saved);
         }
-        if (status === "PUBLISHED") onSaved();
+        if (status === "ACTIVE") onSaved();
       }
     } catch (err: any) {
       setError(err?.response?.data?.message || err?.message || "Save failed");
@@ -470,7 +470,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
             {step < (isFAQ ? 1 : 2) ? (
               <button onClick={() => setStep(step + 1)}>Next</button>
             ) : (
-              <button disabled={saving} onClick={() => handleSave("PUBLISHED")}>Publish Now</button>
+              <button disabled={saving} onClick={() => handleSave("ACTIVE")}>Activate Now</button>
             )}
           </div>
         </div>

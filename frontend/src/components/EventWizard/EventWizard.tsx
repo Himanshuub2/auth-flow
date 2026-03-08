@@ -103,7 +103,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
       return;
     }
     if (editEvent && publish && !form.change_remarks.trim()) {
-      setError("Change remarks are required when publishing an edit");
+      setError("Change remarks are required when activating an edit");
       return;
     }
     setSaving(true);
@@ -128,7 +128,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         tags: form.tags.length ? form.tags : null,
         applicability_type: form.applicability_type,
         applicability_refs: form.applicability_type === "ALL" ? null : form.applicability_refs,
-        status: publish ? "PUBLISHED" : "DRAFT",
+        status: publish ? "ACTIVE" : "DRAFT",
         selected_filenames: [...existingNames, ...form.files.map((f) => f.name)],
         file_metadata: file_metadata.length ? file_metadata : undefined,
         change_remarks: form.change_remarks.trim() || null,
@@ -217,7 +217,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
 
         {editEvent && (
           <div style={{ marginTop: 16 }}>
-            <label style={{ fontWeight: 600, fontSize: 14 }}>Change remarks (required when publishing) *</label>
+            <label style={{ fontWeight: 600, fontSize: 14 }}>Change remarks (required when activating) *</label>
             <textarea
               value={form.change_remarks}
               onChange={(e) => patch({ change_remarks: e.target.value })}
@@ -243,7 +243,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
             </button>
           ) : (
             <button onClick={() => handleSave(true)} style={btnPublish} disabled={saving}>
-              {saving ? "Publishing..." : "Publish Now"}
+              {saving ? "Activating..." : "Activate Now"}
             </button>
           )}
         </div>

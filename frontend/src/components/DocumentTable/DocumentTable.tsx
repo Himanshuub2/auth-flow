@@ -56,7 +56,6 @@ export default function DocumentTable({ onEdit, refreshKey }: Props) {
         <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value as EventStatus | ""); setPage(1); }}>
           <option value="">All Statuses</option>
           <option value="DRAFT">Draft</option>
-          <option value="PUBLISHED">Published</option>
           <option value="ACTIVE">Active</option>
           <option value="INACTIVE">Inactive</option>
         </select>

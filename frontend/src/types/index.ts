@@ -1,4 +1,4 @@
-export type EventStatus = "DRAFT" | "PUBLISHED" | "ACTIVE" | "INACTIVE";
+export type EventStatus = "DRAFT" | "ACTIVE" | "INACTIVE";
 export type ApplicabilityType = "ALL" | "DIVISION" | "EMPLOYEE";
 export type FileType = "IMAGE" | "VIDEO";
 
