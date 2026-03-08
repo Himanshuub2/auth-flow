@@ -7,7 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import BaseEvents
 
-SCHEMA = "ecp_events"
+SCHEMA = "events"
 
 
 class FileType(str, enum.Enum):
@@ -25,7 +25,7 @@ class EventMediaItem(BaseEvents):
     media_versions: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False, default=list)
 
     file_type: Mapped[FileType] = mapped_column(
-        Enum(FileType, name="file_type", create_constraint=True), nullable=False
+        Enum(FileType, name="file_type", schema=SCHEMA, create_constraint=True), nullable=False
     )
     file_url: Mapped[str] = mapped_column(String(500), nullable=False)
     thumbnail_url: Mapped[str | None] = mapped_column(String(500), nullable=True)

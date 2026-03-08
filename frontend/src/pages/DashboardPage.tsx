@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import EventTable from "../components/EventTable/EventTable";
+import ItemsTable from "../components/ItemsTable/ItemsTable";
 import EventWizard from "../components/EventWizard/EventWizard";
-import type { EventData } from "../types";
+import DocumentWizard from "../components/DocumentWizard/DocumentWizard";
+import type { EventData, DocumentData } from "../types";
 
 export default function DashboardPage() {
   const [showWizard, setShowWizard] = useState(false);
   const [editEvent, setEditEvent] = useState<EventData | null>(null);
+  const [showDocWizard, setShowDocWizard] = useState(false);
+  const [editDoc, setEditDoc] = useState<DocumentData | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const navigate = useNavigate();
 
@@ -18,21 +21,13 @@ export default function DashboardPage() {
 
   if (!user) return null;
 
-  const openCreate = () => {
-    setEditEvent(null);
-    setShowWizard(true);
-  };
+  const openCreateEvent = () => { setEditEvent(null); setShowWizard(true); };
+  const openEditEvent = (ev: EventData) => { setEditEvent(ev); setShowWizard(true); };
+  const handleEventSaved = () => { setShowWizard(false); setRefreshKey((k) => k + 1); };
 
-  const openEdit = (ev: EventData) => {
-    setEditEvent(ev);
-    setShowWizard(true);
-  };
-
-  const handleSaved = () => {
-    setShowWizard(false);
-    // setEditEvent(null);
-    setRefreshKey((k) => k + 1);
-  };
+  const openCreateDoc = () => { setEditDoc(null); setShowDocWizard(true); };
+  const openEditDoc = (d: DocumentData) => { setEditDoc(d); setShowDocWizard(true); };
+  const handleDocSaved = () => { setShowDocWizard(false); setRefreshKey((k) => k + 1); };
 
   const logout = () => {
     localStorage.removeItem("token");
@@ -42,23 +37,37 @@ export default function DashboardPage() {
 
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "20px 24px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-        <h1 style={{ margin: 0, fontSize: 22 }}>Event Management</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h1 style={{ margin: 0, fontSize: 22 }}>Knowledge Hub</h1>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ fontSize: 13, color: "#666" }}>{user.full_name}</span>
-          <button onClick={openCreate} style={primaryBtn}>+ New Event</button>
+          <button onClick={openCreateEvent} style={primaryBtn}>+ New Event</button>
+          <button onClick={openCreateDoc} style={primaryBtn}>+ New Document</button>
           <button onClick={logout} style={logoutBtn}>Logout</button>
         </div>
       </div>
 
-      <EventTable onEdit={openEdit} refreshKey={refreshKey} />
+      <ItemsTable
+        onEditEvent={openEditEvent}
+        onEditDocument={openEditDoc}
+        refreshKey={refreshKey}
+      />
 
       {showWizard && (
         <EventWizard
           editEvent={editEvent}
           onClose={() => { setShowWizard(false); setEditEvent(null); }}
-          onSaved={handleSaved}
+          onSaved={handleEventSaved}
           setEditEvent={setEditEvent}
+        />
+      )}
+
+      {showDocWizard && (
+        <DocumentWizard
+          editDoc={editDoc}
+          onClose={() => { setShowDocWizard(false); setEditDoc(null); }}
+          onSaved={handleDocSaved}
+          setEditDoc={setEditDoc}
         />
       )}
     </div>

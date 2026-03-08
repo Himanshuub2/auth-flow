@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.cache import cache_delete
 from app.database import get_db
 from app.models.events.event import Event, EventStatus
 from app.models.events.user import User
@@ -8,6 +9,11 @@ from app.schemas.events.comman import APIResponse, APIResponsePaginated
 from app.schemas.events.event import EventOut, EventSavePayload, MediaFileSummary
 from app.services.events import event_service
 from app.utils.security import get_current_user
+from pydantic import BaseModel
+
+
+class DeactivateEventPayload(BaseModel):
+    deactivate_remarks: str
 
 router = APIRouter()
 
@@ -33,11 +39,14 @@ def _to_out(event: Event) -> EventOut:
         status=event.status,
         applicability_type=event.applicability_type,
         applicability_refs=event.applicability_refs,
-        draft_parent_id=event.draft_parent_id,
+        replaces_document_id=event.replaces_document_id,
         created_by=event.created_by,
         created_by_name=event.creator.full_name,
         created_at=event.created_at,
         updated_at=event.updated_at,
+        change_remarks=event.change_remarks,
+        deactivate_remarks=event.deactivate_remarks,
+        deactivated_at=event.deactivated_at,
         files=files,
     )
 
@@ -58,11 +67,14 @@ def _to_list_out(event: Event) -> EventOut:
         status=event.status,
         applicability_type=event.applicability_type,
         applicability_refs=event.applicability_refs,
-        draft_parent_id=event.draft_parent_id,
+        replaces_document_id=event.replaces_document_id,
         created_by=event.created_by,
         created_by_name=event.creator.full_name,
         created_at=event.created_at,
         updated_at=event.updated_at,
+        change_remarks=event.change_remarks,
+        deactivate_remarks=event.deactivate_remarks,
+        deactivated_at=event.deactivated_at,
         files=[],
     )
 
@@ -76,6 +88,7 @@ async def create_event(
 ):
     payload = EventSavePayload.model_validate_json(data)
     event = await event_service.save_event(db, user.id, payload, files=files or None)
+    await cache_delete(f"item:event:{event.id}")
     return APIResponse(message="Event created", status_code=201, status="success", data=_to_out(event))
 
 
@@ -89,6 +102,9 @@ async def update_event(
 ):
     payload = EventSavePayload.model_validate_json(data)
     event = await event_service.save_event(db, user.id, payload, event_id=event_id, files=files or None)
+    await cache_delete(f"item:event:{event_id}")
+    if event.id != event_id:
+        await cache_delete(f"item:event:{event.id}")
     return APIResponse(message="Event updated", status_code=200, status="success", data=_to_out(event))
 
 
@@ -118,7 +134,7 @@ async def get_event(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    event = await event_service.get_event(db, event_id)
+    event = await event_service.get_event_with_relations(db, event_id)
     return APIResponse(message="Event fetched", status_code=200, status="success", data=_to_out(event))
 
 
@@ -145,7 +161,8 @@ async def toggle_event_status(
 @router.delete("/{event_id}", status_code=204)
 async def delete_event(
     event_id: int,
+    payload: DeactivateEventPayload,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await event_service.delete_event(db, event_id)
+    await event_service.delete_event(db, event_id, payload.deactivate_remarks, user.id)

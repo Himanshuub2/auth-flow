@@ -3,6 +3,7 @@ import logging
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.events.event import Event, EventRevision
 from app.models.events.event_media_item import EventMediaItem
@@ -25,6 +26,7 @@ async def list_revisions(db: AsyncSession, event_id: int):
             EventRevision.event_id,
             EventRevision.media_version,
             EventRevision.revision_number,
+            EventRevision.change_remarks,
             EventRevision.created_at,
         )
         .where(EventRevision.event_id == event_id)
@@ -45,11 +47,13 @@ async def get_revision_snapshot(
     db: AsyncSession, event_id: int, media_version: int, revision_number: int
 ) -> tuple[EventRevision, list[EventMediaItem]]:
     result = await db.execute(
-        select(EventRevision).where(
+        select(EventRevision)
+        .where(
             EventRevision.event_id == event_id,
             EventRevision.media_version == media_version,
             EventRevision.revision_number == revision_number,
         )
+        .options(selectinload(EventRevision.creator))
     )
     revision = result.scalar_one_or_none()
     if not revision:

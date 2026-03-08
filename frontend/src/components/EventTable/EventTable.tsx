@@ -32,8 +32,9 @@ export default function EventTable({ onEdit, refreshKey }: Props) {
   }, [page, statusFilter, refreshKey]);
 
   const handleDelete = async (id: number) => {
-    if (!confirm("Deactivate this event?")) return;
-    await deleteEvent(id);
+    const remarks = prompt("Enter deactivation remarks:");
+    if (!remarks?.trim()) return;
+    await deleteEvent(id, remarks.trim());
     loadEvents();
   };
 

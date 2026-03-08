@@ -7,7 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import BaseEvents
 
-SCHEMA = "ecp_events"
+SCHEMA = "events"
 
 
 class EventStatus(str, enum.Enum):
@@ -38,17 +38,17 @@ class Event(BaseEvents):
     current_revision_number: Mapped[int] = mapped_column(Integer, default=0)
 
     status: Mapped[EventStatus] = mapped_column(
-        Enum(EventStatus, name="event_status", create_constraint=True),
+        Enum(EventStatus, name="event_status", schema=SCHEMA, create_constraint=True),
         default=EventStatus.DRAFT,
     )
 
     applicability_type: Mapped[ApplicabilityType] = mapped_column(
-        Enum(ApplicabilityType, name="applicability_type", create_constraint=True),
+        Enum(ApplicabilityType, name="applicability_type", schema=SCHEMA, create_constraint=True),
         default=ApplicabilityType.ALL,
     )
     applicability_refs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    draft_parent_id: Mapped[int | None] = mapped_column(
+    replaces_document_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="SET NULL"), nullable=True
     )
 
@@ -56,6 +56,12 @@ class Event(BaseEvents):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    change_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deactivate_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deactivated_by: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey(f"{SCHEMA}.users.id", ondelete="SET NULL"), nullable=True
     )
 
     # ── relationships ────────────────────────────────────────────────────
@@ -96,6 +102,7 @@ class EventRevision(BaseEvents):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    change_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # raise: prevents accidental lazy load from child side
     event: Mapped["Event"] = relationship(back_populates="revisions", lazy="raise")

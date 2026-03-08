@@ -25,6 +25,7 @@ class EventSavePayload(BaseModel):
     status: EventStatus = EventStatus.DRAFT
     selected_filenames: list[str] | None = None
     file_metadata: list[FileMetadataIn] | None = None
+    change_remarks: str | None = None
 
 
 class MediaFileSummary(BaseModel):
@@ -53,21 +54,17 @@ class EventOut(BaseModel):
     status: EventStatus
     applicability_type: ApplicabilityType
     applicability_refs: dict | None
-    draft_parent_id: int | None
+    replaces_document_id: int | None = None
     created_by: int
     created_by_name: str
     created_at: datetime
     updated_at: datetime
+    change_remarks: str | None = None
+    deactivate_remarks: str | None = None
+    deactivated_at: datetime | None = None
     files: list[MediaFileSummary]
 
     model_config = {"from_attributes": True}
-
-
-class EventListOut(BaseModel):
-    items: list[EventOut]
-    total: int
-    page: int
-    page_size: int
 
 
 class RevisionOut(BaseModel):
@@ -81,6 +78,7 @@ class RevisionOut(BaseModel):
     event_dates: list | dict | None
     description: str | None
     tags: list | None
+    change_remarks: str | None = None
     created_by: int
     created_by_name: str
     created_at: datetime
@@ -96,4 +94,5 @@ class RevisionListItemOut(BaseModel):
     media_version: int
     revision_number: int
     version_display: str
+    change_remarks: str | None = None
     created_at: datetime

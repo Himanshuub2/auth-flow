@@ -7,8 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.cache import close_redis
 from app.config import settings
-from app.routers.events import auth, events, media, revisions, reference
+from app.routers.documents import combined as doc_combined
+from app.routers.documents import documents as doc_router
+from app.routers.documents import reference as doc_reference
+from app.routers.events import auth, events, media, reference
 from app.schemas.events.comman import APIResponse
 
 logging.basicConfig(
@@ -26,7 +30,8 @@ upload_dir.mkdir(parents=True, exist_ok=True)
 async def lifespan(app: FastAPI):
     logger.info("Starting up")
     yield
-    logger.info("Shutting down")
+    logger.info("Shutting down – closing Redis")
+    await close_redis()
 
 
 app = FastAPI(
@@ -49,11 +54,20 @@ app.mount(
     name="uploads",
 )
 
+# Auth and reference (divisions/designations – shared by events and documents)
 app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(reference.router, prefix="/api/reference", tags=["Reference"])
+
+# Generic items API: one list, one detail, one revisions (item_type=event|document)
+app.include_router(doc_combined.router, prefix="/api/items", tags=["Items"])
+
+# Event CRUD and media (create/update/delete still under /api/events)
 app.include_router(events.router, prefix="/api/events", tags=["Events"])
 app.include_router(media.router, prefix="/api/events/{event_id}/media", tags=["Media"])
-app.include_router(revisions.router, prefix="/api/events/{event_id}/revisions", tags=["Revisions"])
-app.include_router(reference.router, prefix="/api/reference", tags=["Reference"])
+
+# Document CRUD and reference (document types, legislation)
+app.include_router(doc_router.router, prefix="/api/documents", tags=["Documents"])
+app.include_router(doc_reference.router, prefix="/api/reference/documents", tags=["Document Reference"])
 
 
 @app.get("/health")

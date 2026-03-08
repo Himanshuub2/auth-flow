@@ -29,6 +29,7 @@ const emptyForm: WizardFormState = {
   files: [],
   fileMetadata: {},
   existingMedia: [],
+  change_remarks: "",
 };
 
 interface Props {
@@ -55,6 +56,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         files: [],
         fileMetadata: {},
         existingMedia: [],
+        change_remarks: "",
       };
     }
     return { ...emptyForm };
@@ -62,11 +64,21 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
 
   useEffect(() => {
     if (editEvent) {
+      setForm((prev) => ({
+        ...prev,
+        event_name: editEvent.event_name,
+        sub_event_name: editEvent.sub_event_name || "",
+        event_dates: Array.isArray(editEvent.event_dates) ? editEvent.event_dates : [],
+        description: editEvent.description || "",
+        tags: Array.isArray(editEvent.tags) ? editEvent.tags : [],
+        applicability_type: editEvent.applicability_type,
+        applicability_refs: editEvent.applicability_refs || {},
+      }));
       getMedia(editEvent.id).then((r) => {
         setForm((prev) => ({ ...prev, existingMedia: r.data.data ?? [] }));
       });
     }
-  }, [editEvent]);
+  }, [editEvent?.id]);
 
   const patch = (p: Partial<WizardFormState>) => {
     if (p.files !== undefined) {
@@ -88,6 +100,10 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
   const handleSave = async (publish: boolean) => {
     if (!form.event_name.trim()) {
       setError("Event name is required");
+      return;
+    }
+    if (editEvent && publish && !form.change_remarks.trim()) {
+      setError("Change remarks are required when publishing an edit");
       return;
     }
     setSaving(true);
@@ -115,6 +131,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         status: publish ? "PUBLISHED" : "DRAFT",
         selected_filenames: [...existingNames, ...form.files.map((f) => f.name)],
         file_metadata: file_metadata.length ? file_metadata : undefined,
+        change_remarks: form.change_remarks.trim() || null,
       };
 
       const mainFiles = form.files.length ? form.files : undefined;
@@ -129,10 +146,16 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         : undefined;
 
       if (editEvent) {
-        await updateEvent(editEvent.id, payload, allFiles);
+        const res = await updateEvent(editEvent.id, payload, allFiles);
+        const body = res.data as any;
+        const saved: EventData | undefined = body?.data;
+        if (saved && saved.id !== editEvent.id) {
+          setEditEvent(saved);
+        }
       } else {
         const res = await createEvent(payload, allFiles);
-        setEditEvent(res.data.data);
+        const body = res.data as any;
+        setEditEvent(body?.data ?? body);
       }
 
       if(publish) onSaved();
@@ -191,6 +214,19 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
           {step === 1 && <StepFiles form={form} onChange={patch} />}
           {step === 2 && <StepApplicability form={form} onChange={patch} />}
         </div>
+
+        {editEvent && (
+          <div style={{ marginTop: 16 }}>
+            <label style={{ fontWeight: 600, fontSize: 14 }}>Change remarks (required when publishing) *</label>
+            <textarea
+              value={form.change_remarks}
+              onChange={(e) => patch({ change_remarks: e.target.value })}
+              placeholder="Describe what changed in this edit"
+              rows={2}
+              style={{ width: "100%", padding: 8, marginTop: 4, borderRadius: 4, border: "1px solid #ccc" }}
+            />
+          </div>
+        )}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
           {step > 0 && (

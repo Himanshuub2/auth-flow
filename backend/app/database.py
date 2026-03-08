@@ -16,12 +16,12 @@ class Base(DeclarativeBase):
 # Schema-specific bases — models inherit from these to avoid repeating __table_args__
 class BaseEvents(Base):
     __abstract__ = True
-    __table_args__ = {"schema": "ecp_events"}
+    __table_args__ = {"schema": "events"}
 
 
 class BaseDocuments(Base):
     __abstract__ = True
-    __table_args__ = {"schema": "ecp_documents"}
+    __table_args__ = {"schema": "documents"}
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

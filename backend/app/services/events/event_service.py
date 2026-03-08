@@ -7,7 +7,8 @@ from sqlalchemy.orm import selectinload
 
 from app.models.events.event import Event, EventRevision, EventStatus
 from app.models.events.event_media_item import EventMediaItem
-from app.schemas.events.event import EventSavePayload, FileMetadataIn
+from app.models.events.user import User
+from app.schemas.events.event import EventOut, EventSavePayload, FileMetadataIn, MediaFileSummary
 from app.services.events.media_service import upload_files
 
 logger = logging.getLogger(__name__)
@@ -21,15 +22,26 @@ async def save_event(
     event_id: int | None = None,
     files: list[UploadFile] | None = None,
 ) -> Event:
-    if event_id:
-        event = await get_event(db, event_id)
-    else:
+    is_new = event_id is None
+
+    if is_new:
+        # Brand new event - no relation with any existing record
         event = Event(created_by=user_id)
         db.add(event)
         await db.flush()
+    else:
+        event = await get_event(db, event_id)
 
-    if event.status == EventStatus.PUBLISHED and payload.status == EventStatus.DRAFT:
-        event = await _get_or_create_draft(db, event, user_id)
+        if event.status == EventStatus.PUBLISHED and payload.status == EventStatus.DRAFT:
+            # Edit published → save as draft → creates a new draft entry linked to parent
+            event = await _get_or_create_draft(db, event, user_id)
+        elif event.status == EventStatus.PUBLISHED and payload.status == EventStatus.PUBLISHED:
+            # Re-publishing a published event directly: require change_remarks
+            if not payload.change_remarks or not payload.change_remarks.strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="change_remarks is required when publishing an edit",
+                )
 
     event.event_name = payload.event_name
     event.sub_event_name = payload.sub_event_name
@@ -38,6 +50,7 @@ async def save_event(
     event.tags = payload.tags
     event.applicability_type = payload.applicability_type
     event.applicability_refs = payload.applicability_refs
+    event.change_remarks = payload.change_remarks
 
     uploaded_names: list[str] = []
     if files:
@@ -52,15 +65,17 @@ async def save_event(
         await _apply_file_metadata(db, event.id, payload.file_metadata)
 
     if payload.status == EventStatus.PUBLISHED:
-        if event.draft_parent_id is not None:
-            return await _publish_draft(db, event)
-        await _publish_event(db, event)
+        if event.replaces_document_id is not None:
+            # Publishing a draft record → deactivate the parent
+            event = await _publish_draft(db, event)
+        else:
+            await _publish_event(db, event)
     else:
         event.status = EventStatus.DRAFT
 
     await db.flush()
     await db.refresh(event)
-    return event
+    return await get_event_with_relations(db, event.id)
 
 
 async def get_event(db: AsyncSession, event_id: int) -> Event:
@@ -69,6 +84,120 @@ async def get_event(db: AsyncSession, event_id: int) -> Event:
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
     return event
+
+
+async def get_event_with_relations(db: AsyncSession, event_id: int) -> Event:
+    """Load full Event ORM with media_items and creator (for routers that need it)."""
+    result = await db.execute(
+        select(Event)
+        .where(Event.id == event_id)
+        .options(selectinload(Event.media_items), selectinload(Event.creator))
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    return event
+
+
+async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> EventOut:
+    """Item detail: full Event + User.full_name only; media: id, file_url, original_filename, media_versions, file_type."""
+    row = await db.execute(
+        select(Event, User.full_name.label("created_by_name"))
+        .join(User, Event.created_by == User.id)
+        .where(Event.id == event_id)
+    )
+    one = row.one_or_none()
+    if not one:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    event, created_by_name = one[0], one[1]
+    ver = event.current_media_version
+    target_ver = ver if ver > 0 else 0
+
+    media_rows = await db.execute(
+        select(
+            EventMediaItem.id,
+            EventMediaItem.file_url,
+            EventMediaItem.original_filename,
+            EventMediaItem.media_versions,
+            EventMediaItem.file_type,
+        )
+        .where(
+            EventMediaItem.event_id == event_id,
+            EventMediaItem.media_versions.any(target_ver),
+        )
+        .order_by(EventMediaItem.sort_order)
+    )
+    files = [
+        MediaFileSummary(
+            id=r.id,
+            file_url=r.file_url,
+            original_filename=r.original_filename,
+            media_versions=r.media_versions,
+            file_type=r.file_type,
+            thumbnail_url=None,
+            caption=None,
+            description=None,
+        )
+        for r in media_rows.all()
+    ]
+
+    return EventOut(
+        id=event.id,
+        event_name=event.event_name,
+        sub_event_name=event.sub_event_name,
+        event_dates=event.event_dates,
+        description=event.description,
+        tags=event.tags,
+        current_media_version=ver,
+        current_revision_number=event.current_revision_number,
+        version_display=f"{ver}.{event.current_revision_number}",
+        status=event.status,
+        applicability_type=event.applicability_type,
+        applicability_refs=event.applicability_refs,
+        replaces_document_id=event.replaces_document_id,
+        created_by=event.created_by,
+        created_by_name=created_by_name,
+        created_at=event.created_at,
+        updated_at=event.updated_at,
+        change_remarks=event.change_remarks,
+        deactivate_remarks=event.deactivate_remarks,
+        deactivated_at=event.deactivated_at,
+        files=files,
+    )
+
+
+def build_event_out(event: Event) -> EventOut:
+    """Build EventOut from loaded Event (with media_items and creator)."""
+    ver = event.current_media_version
+    target_ver = ver if ver > 0 else 0
+    files = [
+        MediaFileSummary.model_validate(m)
+        for m in event.media_items
+        if target_ver in m.media_versions
+    ]
+    return EventOut(
+        id=event.id,
+        event_name=event.event_name,
+        sub_event_name=event.sub_event_name,
+        event_dates=event.event_dates,
+        description=event.description,
+        tags=event.tags,
+        current_media_version=ver,
+        current_revision_number=event.current_revision_number,
+        version_display=f"{ver}.{event.current_revision_number}",
+        status=event.status,
+        applicability_type=event.applicability_type,
+        applicability_refs=event.applicability_refs,
+        replaces_document_id=event.replaces_document_id,
+        created_by=event.created_by,
+        created_by_name=event.creator.full_name,
+        created_at=event.created_at,
+        updated_at=event.updated_at,
+        change_remarks=event.change_remarks,
+        deactivate_remarks=event.deactivate_remarks,
+        deactivated_at=event.deactivated_at,
+        files=files,
+    )
 
 
 async def list_events(
@@ -95,8 +224,11 @@ async def list_events(
     return events, total
 
 
-async def delete_event(db: AsyncSession, event_id: int) -> None:
+async def delete_event(db: AsyncSession, event_id: int, deactivate_remarks: str, deactivated_by: int) -> None:
     event = await get_event(db, event_id)
+    event.deactivate_remarks = deactivate_remarks
+    event.deactivated_at = func.now()
+    event.deactivated_by = deactivated_by
     event.status = EventStatus.INACTIVE
     await db.flush()
 
@@ -129,7 +261,7 @@ async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_i
 async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: int) -> Event:
     existing = (await db.execute(
         select(Event).where(
-            Event.draft_parent_id == parent.id,
+            Event.replaces_document_id == parent.id,
             Event.status == EventStatus.DRAFT,
         )
     )).scalar_one_or_none()
@@ -147,7 +279,7 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: int) ->
         status=EventStatus.DRAFT,
         applicability_type=parent.applicability_type,
         applicability_refs=parent.applicability_refs,
-        draft_parent_id=parent.id,
+        replaces_document_id=parent.id,
         created_by=user_id,
     )
     db.add(draft)
@@ -210,13 +342,14 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
         event_dates=event.event_dates,
         description=event.description,
         tags=event.tags,
+        change_remarks=event.change_remarks,
         created_by=event.created_by,
     ))
     event.status = EventStatus.PUBLISHED
 
 
 async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
-    parent = await get_event(db, draft.draft_parent_id)
+    parent = await get_event(db, draft.replaces_document_id)
 
     last_rev = _find_latest_revision(parent)
     name_changed = (
@@ -259,12 +392,13 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
         event_dates=draft.event_dates,
         description=draft.description,
         tags=draft.tags,
+        change_remarks=draft.change_remarks,
         created_by=draft.created_by,
     ))
 
     parent.status = EventStatus.INACTIVE
     draft.status = EventStatus.PUBLISHED
-    draft.draft_parent_id = None
+    draft.replaces_document_id = None
 
     await db.flush()
     await db.refresh(draft)
