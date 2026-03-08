@@ -1,7 +1,7 @@
 """Combined database setup: events + documents schemas, all tables, current state.
 
-Use this single migration for fresh installs so team members can set up the DB
-without running the historical migration chain.
+Single migration for fresh installs. Includes: schemas, tables (replaces_document_id),
+enums (event_status/document_status: DRAFT, ACTIVE, INACTIVE — no PUBLISHED), and seed data.
 
 Revision ID: 0001_combined
 Revises: None
@@ -29,9 +29,9 @@ def upgrade() -> None:
     op.execute(sa.text(f"CREATE SCHEMA IF NOT EXISTS {EVENTS}"))
     op.execute(sa.text(f"CREATE SCHEMA IF NOT EXISTS {DOCUMENTS}"))
 
-    # ─── Events schema: enums (in ecp_events / events) ───────────────────
+    # ─── Events schema: enums (DRAFT/ACTIVE/INACTIVE — no PUBLISHED) ───
     for name, values in [
-        ("event_status", "'DRAFT', 'PUBLISHED', 'ACTIVE', 'INACTIVE'"),
+        ("event_status", "'DRAFT', 'ACTIVE', 'INACTIVE'"),
         ("applicability_type", "'ALL', 'DIVISION', 'EMPLOYEE'"),
         ("file_type", "'IMAGE', 'VIDEO'"),
     ]:
@@ -76,7 +76,7 @@ def upgrade() -> None:
         sa.Column(
             "status",
             postgresql.ENUM(
-                "DRAFT", "PUBLISHED", "ACTIVE", "INACTIVE",
+                "DRAFT", "ACTIVE", "INACTIVE",
                 name="event_status", schema=EVENTS, create_type=False,
             ),
             nullable=False,
@@ -160,7 +160,7 @@ def upgrade() -> None:
     ))
     op.execute(sa.text(
         f"DO $$ BEGIN CREATE TYPE {DOCUMENTS}.document_status AS ENUM ("
-        "'DRAFT','PUBLISHED','ACTIVE','INACTIVE'"
+        "'DRAFT','ACTIVE','INACTIVE'"
         "); EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
     ))
     op.execute(sa.text(
@@ -227,7 +227,7 @@ def upgrade() -> None:
         sa.Column(
             "status",
             postgresql.ENUM(
-                "DRAFT", "PUBLISHED", "ACTIVE", "INACTIVE",
+                "DRAFT", "ACTIVE", "INACTIVE",
                 name="document_status", schema=DOCUMENTS, create_type=False,
             ),
             nullable=False,

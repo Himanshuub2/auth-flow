@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from app.cache import close_redis
 from app.config import settings
@@ -73,6 +74,19 @@ app.include_router(doc_reference.router, prefix="/api/reference/documents", tags
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(_request: Request, exc: ValidationError):
+    errors = exc.errors()
+    msg = errors[0]["msg"] if errors else "Validation error"
+    body = APIResponse(
+        message=msg,
+        status_code=422,
+        status="error",
+        data=None,
+    )
+    return JSONResponse(status_code=422, content=body.model_dump())
 
 
 @app.exception_handler(HTTPException)
