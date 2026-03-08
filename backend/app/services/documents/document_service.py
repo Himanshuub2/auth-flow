@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.documents.document import (
-    ApplicabilityType,
     Document,
     DocumentRevision,
     DocumentStatus,
@@ -283,11 +282,18 @@ async def deactivate_document(db: AsyncSession, document_id: int, deactivate_rem
     await db.flush()
 
 
-async def toggle_document_status(db: AsyncSession, user: User, document_id: int) -> Document:
-    await _check_type_permission(user, doc.document_type)
+async def toggle_document_status(db: AsyncSession, document_id: int, user: User | None = None) -> Document:
     doc = await get_document(db, document_id)
+    _check_type_permission(user, doc.document_type)
+
     if doc.document_type == DocumentType.FAQ:
-        existing = (await db.execute(select(Document).where(Document.document_type == DocumentType.FAQ, Document.status == DocumentStatus.ACTIVE).limit(1))).scalar_one_or_none()
+        existing = (await db.execute(select(Document)
+        .where(
+            Document.document_type == DocumentType.FAQ, 
+            Document.status == DocumentStatus.ACTIVE,
+            Document.id != document_id,
+        )
+        .limit(1))).scalar_one_or_none()
         if existing:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Active FAQ already exists")
     if doc.status == DocumentStatus.ACTIVE:

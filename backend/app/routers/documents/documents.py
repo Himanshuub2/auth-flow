@@ -208,7 +208,7 @@ async def toggle_status(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    doc = await document_service.toggle_document_status(db, document_id)
+    doc = await document_service.toggle_document_status(db, document_id, user)
     return APIResponse(message="Status updated", status_code=200, status="success", data=_to_out(doc))
 
 
