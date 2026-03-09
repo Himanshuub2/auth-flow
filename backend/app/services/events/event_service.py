@@ -117,7 +117,10 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         select(
             EventMediaItem.id,
             EventMediaItem.file_url,
+            EventMediaItem.thumbnail_url,
             EventMediaItem.original_filename,
+            EventMediaItem.caption,
+            EventMediaItem.description,
             EventMediaItem.media_versions,
             EventMediaItem.file_type,
         )
@@ -129,14 +132,14 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
     )
     files = [
         MediaFileSummary(
-            id=f.id,
-            file_url=f.file_url,
-            original_filename=f.original_filename,
-            media_versions=f.media_versions,
-            file_type=f.file_type,
-            thumbnail_url=f.thumbnail_url,
-            caption=f.caption,
-            description=f.description,
+            id=r.id,
+            file_url=r.file_url,
+            original_filename=r.original_filename,
+            media_versions=r.media_versions,
+            file_type=r.file_type,
+            thumbnail_url=r.thumbnail_url,
+            caption=r.caption,
+            description=r.description,
         )
         for f in version_files
     ]
