@@ -3,7 +3,7 @@ import StepIndicator from "../common/StepIndicator";
 import StepDetails from "./StepDetails";
 import StepFiles from "./StepFiles";
 import StepApplicability from "./StepApplicability";
-import { createEvent, updateEvent, getMedia } from "../../api";
+import { createEvent, updateEvent } from "../../api";
 import type { WizardFormState, EventData, SaveEventPayload, FileMetadataState } from "../../types";
 
 const STEPS = [
@@ -55,7 +55,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         applicability_refs: editEvent.applicability_refs || {},
         files: [],
         fileMetadata: {},
-        existingMedia: [],
+        existingMedia: (editEvent.files ?? []) as import("../../types").MediaItem[],
         change_remarks: "",
       };
     }
@@ -73,10 +73,8 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         tags: Array.isArray(editEvent.tags) ? editEvent.tags : [],
         applicability_type: editEvent.applicability_type,
         applicability_refs: editEvent.applicability_refs || {},
+        existingMedia: (editEvent.files ?? []) as import("../../types").MediaItem[],
       }));
-      getMedia(editEvent.id).then((r) => {
-        setForm((prev) => ({ ...prev, existingMedia: r.data.data ?? [] }));
-      });
     }
   }, [editEvent?.id]);
 
