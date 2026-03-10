@@ -180,21 +180,7 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
     ver = doc.current_media_version
     target_ver = ver if ver > 0 else 0
 
-    file_rows = await db.execute(
-        select(
-            DocumentFile.id,
-            DocumentFile.file_url,
-            DocumentFile.original_filename,
-            DocumentFile.media_versions,
-            DocumentFile.file_type,
-            DocumentFile.file_size_bytes,
-        )
-        .where(
-            DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.contains([target_ver]),
-        )
-        .order_by(DocumentFile.sort_order)
-    )
+    version_files = await _get_files_for_version(db, document_id, target_ver)
     files = [
         DocumentFileSummary(
             id=f.id,
@@ -441,19 +427,7 @@ async def get_revision_snapshot(
 ) -> tuple[DocumentRevision, list[DocumentFile]]:
     """Load document revision and files at that media version."""
     revision = await get_revision(db, document_id, media_version, revision_number)
-<<<<<<< HEAD
     files = await _get_files_for_version(db, document_id, media_version)
-=======
-    result = await db.execute(
-        select(DocumentFile)
-        .where(
-            DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.contains([media_version]),
-        )
-        .order_by(DocumentFile.sort_order)
-    )
-    files = list(result.scalars().all())
->>>>>>> 1fbb5f6 (added sqlite)
     return revision, files
 
 
@@ -688,38 +662,27 @@ async def _get_all_files(db: AsyncSession, document_id: int) -> list[DocumentFil
     return list(result.scalars().all())
 
 
+async def _get_all_files(db: AsyncSession, document_id: int) -> list[DocumentFile]:
+    result = await db.execute(
+        select(DocumentFile)
+        .where(DocumentFile.document_id == document_id)
+        .order_by(DocumentFile.sort_order)
+    )
+    return list(result.scalars().all())
+
+
 async def _get_files_for_version(
     db: AsyncSession, document_id: int, version: int,
 ) -> list[DocumentFile]:
-<<<<<<< HEAD
     all_files = await _get_all_files(db, document_id)
     return [f for f in all_files if version in (f.media_versions or [])]
-=======
-    result = await db.execute(
-        select(DocumentFile).where(
-            DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.contains([version]),
-        ).order_by(DocumentFile.sort_order)
-    )
-    return list(result.scalars().all())
->>>>>>> 1fbb5f6 (added sqlite)
 
 
 async def _get_names_for_version(
     db: AsyncSession, document_id: int, version: int,
 ) -> set[str]:
-<<<<<<< HEAD
     files = await _get_files_for_version(db, document_id, version)
     return {f.original_filename for f in files}
-=======
-    result = await db.execute(
-        select(DocumentFile.original_filename).where(
-            DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.contains([version]),
-        )
-    )
-    return set(result.scalars().all())
->>>>>>> 1fbb5f6 (added sqlite)
 
 
 async def _files_differ_between(

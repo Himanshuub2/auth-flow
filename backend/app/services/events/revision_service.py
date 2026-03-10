@@ -64,10 +64,7 @@ async def get_revision_snapshot(
 
     media_result = await db.execute(
         select(EventMediaItem)
-        .where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([media_version]),
-        )
+        .where(EventMediaItem.event_id == event_id)
         .order_by(EventMediaItem.sort_order)
     )
     media_items = [

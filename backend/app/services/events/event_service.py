@@ -113,33 +113,17 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
     ver = event.current_media_version
     target_ver = ver if ver > 0 else 0
 
-    media_rows = await db.execute(
-        select(
-            EventMediaItem.id,
-            EventMediaItem.file_url,
-            EventMediaItem.thumbnail_url,
-            EventMediaItem.original_filename,
-            EventMediaItem.caption,
-            EventMediaItem.description,
-            EventMediaItem.media_versions,
-            EventMediaItem.file_type,
-        )
-        .where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([target_ver]),
-        )
-        .order_by(EventMediaItem.sort_order)
-    )
+    version_files = await _get_files_for_version(db, event_id, target_ver)
     files = [
         MediaFileSummary(
-            id=r.id,
-            file_url=r.file_url,
-            original_filename=r.original_filename,
-            media_versions=r.media_versions,
-            file_type=r.file_type,
-            thumbnail_url=r.thumbnail_url,
-            caption=r.caption,
-            description=r.description,
+            id=f.id,
+            file_url=f.file_url,
+            original_filename=f.original_filename,
+            media_versions=f.media_versions,
+            file_type=f.file_type,
+            thumbnail_url=f.thumbnail_url,
+            caption=f.caption,
+            description=f.description,
         )
         for f in version_files
     ]
@@ -439,25 +423,15 @@ async def _get_all_files(db: AsyncSession, event_id: int) -> list[EventMediaItem
 async def _get_files_for_version(
     db: AsyncSession, event_id: int, version: int
 ) -> list[EventMediaItem]:
-    result = await db.execute(
-        select(EventMediaItem).where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([version]),
-        ).order_by(EventMediaItem.sort_order)
-    )
-    return list(result.scalars().all())
+    all_files = await _get_all_files(db, event_id)
+    return [f for f in all_files if version in (f.media_versions or [])]
 
 
 async def _get_names_for_version(
     db: AsyncSession, event_id: int, version: int
 ) -> set[str]:
-    result = await db.execute(
-        select(EventMediaItem.original_filename).where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([version]),
-        )
-    )
-    return set(result.scalars().all())
+    files = await _get_files_for_version(db, event_id, version)
+    return {f.original_filename for f in files}
 
 
 async def _files_differ_between(
