@@ -116,10 +116,7 @@ async def get_document_files(
 ) -> list[DocumentFile]:
     result = await db.execute(
         select(DocumentFile)
-        .where(
-            DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.contains([version]),
-        )
+        .where(DocumentFile.document_id == document_id)
         .order_by(DocumentFile.sort_order)
     )
-    return list(result.scalars().all())
+    return [f for f in result.scalars().all() if version in (f.media_versions or [])]

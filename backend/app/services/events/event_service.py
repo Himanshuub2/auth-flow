@@ -113,35 +113,19 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
     ver = event.current_media_version
     target_ver = ver if ver > 0 else 0
 
-    media_rows = await db.execute(
-        select(
-            EventMediaItem.id,
-            EventMediaItem.file_url,
-            EventMediaItem.thumbnail_url,
-            EventMediaItem.original_filename,
-            EventMediaItem.caption,
-            EventMediaItem.description,
-            EventMediaItem.media_versions,
-            EventMediaItem.file_type,
-        )
-        .where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([target_ver]),
-        )
-        .order_by(EventMediaItem.sort_order)
-    )
+    version_files = await _get_files_for_version(db, event_id, target_ver)
     files = [
         MediaFileSummary(
-            id=r.id,
-            file_url=r.file_url,
-            original_filename=r.original_filename,
-            media_versions=r.media_versions,
-            file_type=r.file_type,
-            thumbnail_url=r.thumbnail_url,
-            caption=r.caption,
-            description=r.description,
+            id=f.id,
+            file_url=f.file_url,
+            original_filename=f.original_filename,
+            media_versions=f.media_versions,
+            file_type=f.file_type,
+            thumbnail_url=f.thumbnail_url,
+            caption=f.caption,
+            description=f.description,
         )
-        for r in media_rows.all()
+        for f in version_files
     ]
 
     return EventOut(
@@ -321,20 +305,21 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
             event.current_revision_number += 1
         new_ver = event.current_media_version
 
-    staging = await _get_files_for_version(db, event.id, 0)
-    for f in staging:
-        clean = [v for v in f.media_versions if v != 0]
-        if new_ver not in clean:
-            clean.append(new_ver)
-        f.media_versions = clean
-
-    all_files = (await db.execute(
-        select(EventMediaItem).where(EventMediaItem.event_id == event.id)
-    )).scalars().all()
-    staging_ids = {f.id for f in staging}
+    all_files = await _get_all_files(db, event.id)
+    staging_ids: set[int] = set()
     for f in all_files:
-        if f.id not in staging_ids and 0 in f.media_versions:
-            f.media_versions = [v for v in f.media_versions if v != 0]
+        versions = f.media_versions or []
+        if 0 in versions:
+            staging_ids.add(f.id)
+            clean = [v for v in versions if v != 0]
+            if new_ver not in clean:
+                clean.append(new_ver)
+            f.media_versions = clean
+
+    for f in all_files:
+        versions = f.media_versions or []
+        if f.id not in staging_ids and 0 in versions:
+            f.media_versions = [v for v in versions if v != 0]
 
     db.add(EventRevision(
         event_id=event.id,
@@ -370,19 +355,19 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
 
     new_ver = draft.current_media_version
 
-    staging = await _get_files_for_version(db, draft.id, 0)
-    for f in staging:
-        clean = [v for v in f.media_versions if v != 0]
-        if new_ver not in clean:
-            clean.append(new_ver)
-        f.media_versions = clean
+    draft_files = await _get_all_files(db, draft.id)
+    for f in draft_files:
+        versions = f.media_versions or []
+        if 0 in versions:
+            clean = [v for v in versions if v != 0]
+            if new_ver not in clean:
+                clean.append(new_ver)
+            f.media_versions = clean
 
     for rev in parent.revisions:
         rev.event_id = draft.id
 
-    parent_files = (await db.execute(
-        select(EventMediaItem).where(EventMediaItem.event_id == parent.id)
-    )).scalars().all()
+    parent_files = await _get_all_files(db, parent.id)
     for f in parent_files:
         f.event_id = draft.id
 
@@ -426,28 +411,27 @@ async def _version_should_bump(db: AsyncSession, event: Event) -> bool:
     return await _files_differ_between(db, event.id, 0, event.id, event.current_media_version)
 
 
+async def _get_all_files(db: AsyncSession, event_id: int) -> list[EventMediaItem]:
+    result = await db.execute(
+        select(EventMediaItem)
+        .where(EventMediaItem.event_id == event_id)
+        .order_by(EventMediaItem.sort_order)
+    )
+    return list(result.scalars().all())
+
+
 async def _get_files_for_version(
     db: AsyncSession, event_id: int, version: int
 ) -> list[EventMediaItem]:
-    result = await db.execute(
-        select(EventMediaItem).where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([version]),
-        ).order_by(EventMediaItem.sort_order)
-    )
-    return list(result.scalars().all())
+    all_files = await _get_all_files(db, event_id)
+    return [f for f in all_files if version in (f.media_versions or [])]
 
 
 async def _get_names_for_version(
     db: AsyncSession, event_id: int, version: int
 ) -> set[str]:
-    result = await db.execute(
-        select(EventMediaItem.original_filename).where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([version]),
-        )
-    )
-    return set(result.scalars().all())
+    files = await _get_files_for_version(db, event_id, version)
+    return {f.original_filename for f in files}
 
 
 async def _files_differ_between(
@@ -465,19 +449,17 @@ async def _sync_staging(
 ) -> None:
     """Make staging (version 0) match exactly what FE sent."""
     desired = set(selected_names)
-
-    all_files = (await db.execute(
-        select(EventMediaItem).where(EventMediaItem.event_id == event.id)
-    )).scalars().all()
+    all_files = await _get_all_files(db, event.id)
 
     for f in all_files:
-        in_staging = 0 in f.media_versions
+        versions = f.media_versions or []
+        in_staging = 0 in versions
         wanted = f.original_filename in desired
 
         if wanted and not in_staging:
-            f.media_versions = [*f.media_versions, 0]
+            f.media_versions = [*versions, 0]
         elif not wanted and in_staging:
-            f.media_versions = [v for v in f.media_versions if v != 0]
+            f.media_versions = [v for v in versions if v != 0]
 
 
 async def _apply_file_metadata(

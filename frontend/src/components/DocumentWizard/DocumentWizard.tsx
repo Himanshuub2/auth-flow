@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   createDocument,
   updateDocument,
+  getDocument,
   getDocumentTypes,
   getLegislation,
   getSubLegislation,
@@ -101,6 +102,18 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
 
   useEffect(() => {
     if (editDoc) {
+      // Refetch full detail (including files) so existing files are never missing when appending new ones
+      getDocument(editDoc.id)
+        .then((res) => {
+          const data = (res.data as { data?: DocumentData })?.data;
+          if (data && setEditDoc) setEditDoc(data);
+        })
+        .catch(() => {});
+    }
+  }, [editDoc?.id]);
+
+  useEffect(() => {
+    if (editDoc) {
       setForm({
         name: editDoc.name,
         document_type: editDoc.document_type,
@@ -127,7 +140,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
       setRemovedExistingIds([]);
       setLinkedItems([]);
     }
-  }, [editDoc?.id]);
+  }, [editDoc]);
 
   const [docTypes, setDocTypes] = useState<DocumentTypeOption[]>([]);
   const [legislations, setLegislations] = useState<LegislationOption[]>([]);
@@ -219,7 +232,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         const res = await updateDocument(editDoc.id, payload, files.length ? files : undefined);
         const body = res.data as any;
         const saved: DocumentData | undefined = body?.data;
-        if (saved && saved.id !== editDoc.id && setEditDoc) {
+        if (saved && setEditDoc) {
           setEditDoc(saved);
         }
         if (status === "ACTIVE") onSaved();

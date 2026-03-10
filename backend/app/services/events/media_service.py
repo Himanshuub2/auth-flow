@@ -153,10 +153,7 @@ async def get_media_items(
 
     result = await db.execute(
         select(EventMediaItem)
-        .where(
-            EventMediaItem.event_id == event_id,
-            EventMediaItem.media_versions.contains([version]),
-        )
+        .where(EventMediaItem.event_id == event_id)
         .order_by(EventMediaItem.sort_order)
     )
-    return list(result.scalars().all())
+    return [f for f in result.scalars().all() if version in (f.media_versions or [])]

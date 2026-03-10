@@ -3,7 +3,7 @@ import StepIndicator from "../common/StepIndicator";
 import StepDetails from "./StepDetails";
 import StepFiles from "./StepFiles";
 import StepApplicability from "./StepApplicability";
-import { createEvent, updateEvent } from "../../api";
+import { createEvent, updateEvent, getEvent } from "../../api";
 import type { WizardFormState, EventData, SaveEventPayload, FileMetadataState } from "../../types";
 
 const STEPS = [
@@ -64,6 +64,18 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
 
   useEffect(() => {
     if (editEvent) {
+      // Refetch full detail (including files) so existing files are never missing when appending new ones
+      getEvent(editEvent.id)
+        .then((res) => {
+          const data = (res.data as { data?: EventData })?.data;
+          if (data) setEditEvent(data);
+        })
+        .catch(() => {});
+    }
+  }, [editEvent?.id]);
+
+  useEffect(() => {
+    if (editEvent) {
       setForm((prev) => ({
         ...prev,
         event_name: editEvent.event_name,
@@ -73,10 +85,12 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         tags: Array.isArray(editEvent.tags) ? editEvent.tags : [],
         applicability_type: editEvent.applicability_type,
         applicability_refs: editEvent.applicability_refs || {},
+        files: [],
+        fileMetadata: {},
         existingMedia: (editEvent.files ?? []) as import("../../types").MediaItem[],
       }));
     }
-  }, [editEvent?.id]);
+  }, [editEvent]);
 
   const patch = (p: Partial<WizardFormState>) => {
     if (p.files !== undefined) {
@@ -147,7 +161,7 @@ export default function EventWizard({ editEvent, onClose, onSaved, setEditEvent 
         const res = await updateEvent(editEvent.id, payload, allFiles);
         const body = res.data as any;
         const saved: EventData | undefined = body?.data;
-        if (saved && saved.id !== editEvent.id) {
+        if (saved) {
           setEditEvent(saved);
         }
       } else {
