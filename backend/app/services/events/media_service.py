@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.events.event import Event
+from app.models.events.event import Event, EventRevision
 from app.models.events.event_media_item import EventMediaItem, FileType
 from app.schemas.events.event import FileMetadataIn
 from app.storage import get_storage
@@ -60,7 +60,6 @@ async def upload_files(
     storage = get_storage()
     thumb_urls: dict[str, str] = {}
 
-    # Upload thumbnail files first (no DB row)
     for file in files:
         filename = file.filename or "unknown"
         if filename not in thumbnail_filenames:
@@ -108,8 +107,6 @@ async def upload_files(
         )).scalar_one_or_none()
 
         if existing:
-            if 0 not in existing.media_versions:
-                existing.media_versions = [*existing.media_versions, 0]
             if meta:
                 existing.caption = meta.caption
                 existing.description = meta.description
@@ -124,7 +121,6 @@ async def upload_files(
 
         item = EventMediaItem(
             event_id=event_id,
-            media_versions=[0],
             file_type=file_type,
             file_url=storage.get_url(dest_path),
             thumbnail_url=thumbnail_url,
@@ -151,9 +147,37 @@ async def get_media_items(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
         version = event.current_media_version
 
+    file_ids = await _get_file_ids_for_version(db, event_id, version)
+    if not file_ids:
+        return []
+
     result = await db.execute(
         select(EventMediaItem)
         .where(EventMediaItem.event_id == event_id)
         .order_by(EventMediaItem.sort_order)
     )
-    return [f for f in result.scalars().all() if version in (f.media_versions or [])]
+    all_files = list(result.scalars().all())
+    id_set = set(file_ids)
+    return [f for f in all_files if f.id in id_set]
+
+
+async def _get_file_ids_for_version(db: AsyncSession, event_id: int, version: int) -> list[int]:
+    """Get file IDs for a version from the event's staging or revision."""
+    event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
+    if not event:
+        return []
+    if version == 0:
+        return list(event.staging_file_ids or [])
+    result = await db.execute(
+        select(EventRevision.file_ids)
+        .where(
+            EventRevision.event_id == event_id,
+            EventRevision.media_version == version,
+        )
+        .order_by(EventRevision.revision_number.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return list(row)
+    return list(event.staging_file_ids or [])

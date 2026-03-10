@@ -237,7 +237,23 @@ async def get_item_revision_snapshot(
         )
         return RevisionDetailOut(
             revision=rev_out,
-            media_items=[MediaItemOut.model_validate(m) for m in media_items],
+            media_items=[
+                MediaItemOut(
+                    id=m.id,
+                    event_id=m.event_id,
+                    media_versions=[media_version],
+                    file_type=m.file_type,
+                    file_url=m.file_url,
+                    thumbnail_url=m.thumbnail_url,
+                    caption=m.caption,
+                    description=m.description,
+                    sort_order=m.sort_order,
+                    file_size_bytes=m.file_size_bytes,
+                    original_filename=m.original_filename,
+                    created_at=m.created_at,
+                )
+                for m in media_items
+            ],
         )
     if item_type == "document":
         revision, files = await document_service.get_revision_snapshot(
@@ -261,7 +277,17 @@ async def get_item_revision_snapshot(
         )
         return DocumentRevisionDetailOut(
             revision=rev_out,
-            files=[DocumentFileSummary.model_validate(f) for f in files],
+            files=[
+                DocumentFileSummary(
+                    id=f.id,
+                    original_filename=f.original_filename,
+                    file_type=f.file_type,
+                    file_url=f.file_url,
+                    media_versions=[media_version],
+                    file_size_bytes=f.file_size_bytes,
+                )
+                for f in files
+            ],
         )
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,

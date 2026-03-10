@@ -25,7 +25,6 @@ async def save_event(
     is_new = event_id is None
 
     if is_new:
-        # Brand new event - no relation with any existing record
         event = Event(created_by=user_id)
         db.add(event)
         await db.flush()
@@ -33,10 +32,8 @@ async def save_event(
         event = await get_event(db, event_id)
 
         if event.status == EventStatus.ACTIVE and payload.status == EventStatus.DRAFT:
-            # Edit active → save as draft → creates a new draft entry linked to parent
             event = await _get_or_create_draft(db, event, user_id)
         elif event.status == EventStatus.ACTIVE and payload.status == EventStatus.ACTIVE:
-            # Re-publishing a published event directly: require change_remarks
             if not payload.change_remarks or not payload.change_remarks.strip():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -52,21 +49,28 @@ async def save_event(
     event.applicability_refs = payload.applicability_refs
     event.change_remarks = payload.change_remarks
 
+    uploaded_ids: list[int] = []
     uploaded_names: list[str] = []
     if files:
         uploaded = await upload_files(db, event.id, files, payload.file_metadata)
+        uploaded_ids = [f.id for f in uploaded]
         uploaded_names = [f.original_filename for f in uploaded]
 
     if payload.selected_filenames is not None:
         all_names = list(dict.fromkeys([*payload.selected_filenames, *uploaded_names]))
         await _sync_staging(db, event, all_names)
+    elif uploaded_ids:
+        existing_staging = list(event.staging_file_ids or [])
+        for fid in uploaded_ids:
+            if fid not in existing_staging:
+                existing_staging.append(fid)
+        event.staging_file_ids = existing_staging
 
     if payload.file_metadata:
         await _apply_file_metadata(db, event.id, payload.file_metadata)
 
     if payload.status == EventStatus.ACTIVE:
         if event.replaces_document_id is not None:
-            # Publishing a draft record → deactivate the parent
             event = await _publish_draft(db, event)
         else:
             await _publish_event(db, event)
@@ -99,8 +103,19 @@ async def get_event_with_relations(db: AsyncSession, event_id: int) -> Event:
     return event
 
 
+def _compute_media_versions(file_id: int, event: Event) -> list[int]:
+    """Compute the media_versions list for a file based on staging and revisions."""
+    versions: list[int] = []
+    if file_id in (event.staging_file_ids or []):
+        versions.append(0)
+    for rev in (event.revisions or []):
+        if file_id in (rev.file_ids or []):
+            versions.append(rev.media_version)
+    return sorted(set(versions))
+
+
 async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> EventOut:
-    """Item detail: full Event + User.full_name only; media: id, file_url, original_filename, media_versions, file_type."""
+    """Item detail: full Event + User.full_name only; media filtered by current version."""
     row = await db.execute(
         select(Event, User.full_name.label("created_by_name"))
         .join(User, Event.created_by == User.id)
@@ -111,15 +126,18 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
     event, created_by_name = one[0], one[1]
     ver = event.current_media_version
-    target_ver = ver if ver > 0 else 0
 
-    version_files = await _get_files_for_version(db, event_id, target_ver)
+    file_ids = await _get_file_ids_for_version(db, event, ver if ver > 0 else 0)
+    all_files = await _get_all_files(db, event_id)
+    file_by_id = {f.id: f for f in all_files}
+    version_files = [file_by_id[fid] for fid in file_ids if fid in file_by_id]
+
     files = [
         MediaFileSummary(
             id=f.id,
             file_url=f.file_url,
             original_filename=f.original_filename,
-            media_versions=f.media_versions,
+            media_versions=_compute_media_versions(f.id, event),
             file_type=f.file_type,
             thumbnail_url=f.thumbnail_url,
             caption=f.caption,
@@ -157,10 +175,21 @@ def build_event_out(event: Event) -> EventOut:
     """Build EventOut from loaded Event (with media_items and creator)."""
     ver = event.current_media_version
     target_ver = ver if ver > 0 else 0
+    target_file_ids = _get_file_ids_for_version_sync(event, target_ver)
+    file_by_id = {m.id: m for m in event.media_items}
     files = [
-        MediaFileSummary.model_validate(m)
-        for m in event.media_items
-        if target_ver in m.media_versions
+        MediaFileSummary(
+            id=m.id,
+            file_url=m.file_url,
+            original_filename=m.original_filename,
+            media_versions=_compute_media_versions(m.id, event),
+            file_type=m.file_type,
+            thumbnail_url=m.thumbnail_url,
+            caption=m.caption,
+            description=m.description,
+        )
+        for fid in target_file_ids
+        if (m := file_by_id.get(fid)) is not None
     ]
     return EventOut(
         id=event.id,
@@ -255,6 +284,11 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: int) ->
     if existing:
         return existing
 
+    parent_file_ids = await _get_file_ids_for_version(db, parent, parent.current_media_version)
+
+    parent_files = await _get_all_files(db, parent.id)
+    parent_file_by_id = {f.id: f for f in parent_files}
+
     draft = Event(
         event_name=parent.event_name,
         sub_event_name=parent.sub_event_name,
@@ -272,20 +306,27 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: int) ->
     db.add(draft)
     await db.flush()
 
-    parent_files = await _get_files_for_version(db, parent.id, parent.current_media_version)
-    for f in parent_files:
-        db.add(EventMediaItem(
+    new_staging_ids: list[int] = []
+    for fid in parent_file_ids:
+        pf = parent_file_by_id.get(fid)
+        if not pf:
+            continue
+        new_file = EventMediaItem(
             event_id=draft.id,
-            media_versions=[0],
-            file_type=f.file_type,
-            file_url=f.file_url,
-            thumbnail_url=f.thumbnail_url,
-            caption=f.caption,
-            description=f.description,
-            sort_order=f.sort_order,
-            file_size_bytes=f.file_size_bytes,
-            original_filename=f.original_filename,
-        ))
+            file_type=pf.file_type,
+            file_url=pf.file_url,
+            thumbnail_url=pf.thumbnail_url,
+            caption=pf.caption,
+            description=pf.description,
+            sort_order=pf.sort_order,
+            file_size_bytes=pf.file_size_bytes,
+            original_filename=pf.original_filename,
+        )
+        db.add(new_file)
+        await db.flush()
+        new_staging_ids.append(new_file.id)
+
+    draft.staging_file_ids = new_staging_ids
     await db.flush()
     return draft
 
@@ -296,30 +337,14 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
     if event.current_media_version == 0:
         event.current_media_version = 1
         event.current_revision_number = 0
-        new_ver = 1
     else:
         if await _version_should_bump(db, event):
             event.current_media_version += 1
             event.current_revision_number = 0
         else:
             event.current_revision_number += 1
-        new_ver = event.current_media_version
 
-    all_files = await _get_all_files(db, event.id)
-    staging_ids: set[int] = set()
-    for f in all_files:
-        versions = f.media_versions or []
-        if 0 in versions:
-            staging_ids.add(f.id)
-            clean = [v for v in versions if v != 0]
-            if new_ver not in clean:
-                clean.append(new_ver)
-            f.media_versions = clean
-
-    for f in all_files:
-        versions = f.media_versions or []
-        if f.id not in staging_ids and 0 in versions:
-            f.media_versions = [v for v in versions if v != 0]
+    published_file_ids = list(event.staging_file_ids or [])
 
     db.add(EventRevision(
         event_id=event.id,
@@ -331,8 +356,11 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
         description=event.description,
         tags=event.tags,
         change_remarks=event.change_remarks,
+        file_ids=published_file_ids,
         created_by=event.created_by,
     ))
+
+    event.staging_file_ids = []
     event.status = EventStatus.ACTIVE
 
 
@@ -344,7 +372,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
         draft.event_name != last_rev.event_name
         or draft.sub_event_name != last_rev.sub_event_name
     ) if last_rev else True
-    files_changed = await _files_differ_between(db, draft.id, 0, parent.id, parent.current_media_version)
+    files_changed = await _files_differ_between(db, draft, 0, parent, parent.current_media_version)
 
     if name_changed or files_changed:
         draft.current_media_version = parent.current_media_version + 1
@@ -353,16 +381,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
         draft.current_media_version = parent.current_media_version
         draft.current_revision_number = parent.current_revision_number + 1
 
-    new_ver = draft.current_media_version
-
-    draft_files = await _get_all_files(db, draft.id)
-    for f in draft_files:
-        versions = f.media_versions or []
-        if 0 in versions:
-            clean = [v for v in versions if v != 0]
-            if new_ver not in clean:
-                clean.append(new_ver)
-            f.media_versions = clean
+    published_file_ids = list(draft.staging_file_ids or [])
 
     for rev in parent.revisions:
         rev.event_id = draft.id
@@ -373,7 +392,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
 
     db.add(EventRevision(
         event_id=draft.id,
-        media_version=new_ver,
+        media_version=draft.current_media_version,
         revision_number=draft.current_revision_number,
         event_name=draft.event_name,
         sub_event_name=draft.sub_event_name,
@@ -381,12 +400,14 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
         description=draft.description,
         tags=draft.tags,
         change_remarks=draft.change_remarks,
+        file_ids=published_file_ids,
         created_by=draft.created_by,
     ))
 
     parent.status = EventStatus.INACTIVE
     draft.status = EventStatus.ACTIVE
     draft.replaces_document_id = None
+    draft.staging_file_ids = []
 
     await db.flush()
     await db.refresh(draft)
@@ -408,7 +429,7 @@ async def _version_should_bump(db: AsyncSession, event: Event) -> bool:
     if (event.event_name != last_rev.event_name
             or event.sub_event_name != last_rev.sub_event_name):
         return True
-    return await _files_differ_between(db, event.id, 0, event.id, event.current_media_version)
+    return await _files_differ_between(db, event, 0, event, event.current_media_version)
 
 
 async def _get_all_files(db: AsyncSession, event_id: int) -> list[EventMediaItem]:
@@ -420,46 +441,69 @@ async def _get_all_files(db: AsyncSession, event_id: int) -> list[EventMediaItem
     return list(result.scalars().all())
 
 
-async def _get_files_for_version(
-    db: AsyncSession, event_id: int, version: int
-) -> list[EventMediaItem]:
-    all_files = await _get_all_files(db, event_id)
-    return [f for f in all_files if version in (f.media_versions or [])]
+def _get_file_ids_for_version_sync(event: Event, version: int) -> list[int]:
+    """Sync version: get file IDs for a version from loaded event (staging or revisions)."""
+    if version == 0:
+        return list(event.staging_file_ids or [])
+    for rev in (event.revisions or []):
+        if rev.media_version == version:
+            return list(rev.file_ids or [])
+    return list(event.staging_file_ids or [])
+
+
+async def _get_file_ids_for_version(db: AsyncSession, event: Event, version: int) -> list[int]:
+    """Get file IDs for a version. For staging (0), use event.staging_file_ids. For published, find revision."""
+    if version == 0:
+        return list(event.staging_file_ids or [])
+    result = await db.execute(
+        select(EventRevision.file_ids)
+        .where(
+            EventRevision.event_id == event.id,
+            EventRevision.media_version == version,
+        )
+        .order_by(EventRevision.revision_number.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return list(row)
+    return list(event.staging_file_ids or [])
 
 
 async def _get_names_for_version(
-    db: AsyncSession, event_id: int, version: int
+    db: AsyncSession, event: Event, version: int,
 ) -> set[str]:
-    files = await _get_files_for_version(db, event_id, version)
-    return {f.original_filename for f in files}
+    file_ids = await _get_file_ids_for_version(db, event, version)
+    if not file_ids:
+        return set()
+    all_files = await _get_all_files(db, event.id)
+    file_by_id = {f.id: f for f in all_files}
+    return {file_by_id[fid].original_filename for fid in file_ids if fid in file_by_id}
 
 
 async def _files_differ_between(
     db: AsyncSession,
-    event_id_a: int, version_a: int,
-    event_id_b: int, version_b: int,
+    event_a: Event, version_a: int,
+    event_b: Event, version_b: int,
 ) -> bool:
-    names_a = await _get_names_for_version(db, event_id_a, version_a)
-    names_b = await _get_names_for_version(db, event_id_b, version_b)
+    names_a = await _get_names_for_version(db, event_a, version_a)
+    names_b = await _get_names_for_version(db, event_b, version_b)
     return names_a != names_b
 
 
 async def _sync_staging(
     db: AsyncSession, event: Event, selected_names: list[str]
 ) -> None:
-    """Make staging (version 0) match exactly what FE sent."""
+    """Make staging (staging_file_ids) match exactly what FE sent."""
     desired = set(selected_names)
     all_files = await _get_all_files(db, event.id)
-
-    for f in all_files:
-        versions = f.media_versions or []
-        in_staging = 0 in versions
-        wanted = f.original_filename in desired
-
-        if wanted and not in_staging:
-            f.media_versions = [*versions, 0]
-        elif not wanted and in_staging:
-            f.media_versions = [v for v in versions if v != 0]
+    name_to_file = {f.original_filename: f for f in all_files}
+    new_staging: list[int] = []
+    for name in selected_names:
+        f = name_to_file.get(name)
+        if f:
+            new_staging.append(f.id)
+    event.staging_file_ids = new_staging
 
 
 async def _apply_file_metadata(

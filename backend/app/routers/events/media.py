@@ -19,5 +19,22 @@ async def get_media(
     user: User = Depends(get_current_user),
 ):
     items = await media_service.get_media_items(db, event_id, version)
-    data = [MediaItemOut.model_validate(i) for i in items]
+    effective_ver = version if version is not None else 0
+    data = [
+        MediaItemOut(
+            id=i.id,
+            event_id=i.event_id,
+            media_versions=[effective_ver] if effective_ver > 0 else [0],
+            file_type=i.file_type,
+            file_url=i.file_url,
+            thumbnail_url=i.thumbnail_url,
+            caption=i.caption,
+            description=i.description,
+            sort_order=i.sort_order,
+            file_size_bytes=i.file_size_bytes,
+            original_filename=i.original_filename,
+            created_at=i.created_at,
+        )
+        for i in items
+    ]
     return APIResponse(message="Media fetched", status_code=200, status="success", data=data)

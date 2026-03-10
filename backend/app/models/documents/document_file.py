@@ -24,8 +24,6 @@ class DocumentFile(BaseDocuments):
         Integer, ForeignKey(f"{SCHEMA}.documents.id", ondelete="CASCADE"), nullable=False,
     )
 
-    media_versions: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False, default=list)
-
     file_type: Mapped[DocumentFileType] = mapped_column(
         Enum(DocumentFileType, name="doc_file_type", schema=SCHEMA, create_constraint=True),
         nullable=False,

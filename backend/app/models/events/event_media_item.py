@@ -8,7 +8,6 @@ from app.database import BaseEvents
 from app.db_utils import (
     events_table,
     fk_events,
-    media_versions_type,
     schema_events,
 )
 
@@ -26,8 +25,6 @@ class EventMediaItem(BaseEvents):
     event_id: Mapped[int] = mapped_column(
         Integer, ForeignKey(fk_events("events"), ondelete="CASCADE"), nullable=False
     )
-
-    media_versions: Mapped[list[int]] = mapped_column(media_versions_type(), nullable=False, default=list)
 
     file_type: Mapped[FileType] = mapped_column(
         Enum(FileType, name="file_type", schema=schema_events(), create_constraint=True), nullable=False

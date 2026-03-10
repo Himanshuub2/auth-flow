@@ -148,6 +148,8 @@ class Document(BaseDocuments):
     current_media_version: Mapped[int] = mapped_column(Integer, default=0)
     current_revision_number: Mapped[int] = mapped_column(Integer, default=0)
 
+    staging_file_ids: Mapped[list] = mapped_column(json_type(), nullable=False, default=list)
+
     change_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
     deactivate_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -208,6 +210,8 @@ class DocumentRevision(BaseDocuments):
         default=ApplicabilityType.ALL,
     )
     applicability_refs: Mapped[dict | None] = mapped_column(json_type(), nullable=True)
+
+    file_ids: Mapped[list] = mapped_column(json_type(), nullable=False, default=list)
 
     created_by: Mapped[int] = mapped_column(
         Integer, ForeignKey(fk_users()), nullable=False,

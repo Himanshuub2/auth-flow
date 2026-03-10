@@ -7,7 +7,6 @@ from app.models.documents.document import Document, DocumentStatus, DocumentType
 from app.models.events.user import User
 from app.schemas.documents.document import (
     DeactivatePayload,
-    DocumentFileSummary,
     DocumentOut,
     DocumentRevisionOut,
     DocumentSavePayload,
@@ -26,42 +25,8 @@ def _to_out(
     doc: Document,
     linked_document_details: list[LinkedDocumentDetail] | None = None,
 ) -> DocumentOut:
-    ver = doc.current_media_version
-    target_ver = ver if ver > 0 else 0
-    files = [
-        DocumentFileSummary.model_validate(f)
-        for f in doc.files
-        if target_ver in f.media_versions
-    ]
-    return DocumentOut(
-        id=doc.id,
-        name=doc.name,
-        document_type=document_type_to_label(doc.document_type.value),
-        tags=doc.tags,
-        summary=doc.summary,
-        legislation_id=doc.legislation_id,
-        sub_legislation_id=doc.sub_legislation_id,
-        version=doc.version,
-        next_review_date=doc.next_review_date,
-        download_allowed=doc.download_allowed,
-        linked_document_ids=doc.linked_document_ids,
-        applicability_type=doc.applicability_type,
-        applicability_refs=doc.applicability_refs,
-        status=doc.status,
-        current_media_version=ver,
-        current_revision_number=doc.current_revision_number,
-        version_display=f"{ver}.{doc.current_revision_number}",
-        change_remarks=doc.change_remarks,
-        deactivate_remarks=doc.deactivate_remarks,
-        deactivated_at=doc.deactivated_at,
-        replaces_document_id=doc.replaces_document_id,
-        created_by=doc.created_by,
-        created_by_name=doc.creator.full_name,
-        created_at=doc.created_at,
-        updated_at=doc.updated_at,
-        files=files,
-        linked_document_details=linked_document_details,
-    )
+    from app.services.documents.document_service import build_document_out
+    return build_document_out(doc, linked_document_details)
 
 
 def _to_list_out(doc: Document) -> DocumentOut:

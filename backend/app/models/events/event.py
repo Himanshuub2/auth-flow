@@ -40,6 +40,8 @@ class Event(BaseEvents):
     current_media_version: Mapped[int] = mapped_column(Integer, default=0)
     current_revision_number: Mapped[int] = mapped_column(Integer, default=0)
 
+    staging_file_ids: Mapped[list] = mapped_column(json_type(), nullable=False, default=list)
+
     status: Mapped[EventStatus] = mapped_column(
         Enum(EventStatus, name="event_status", schema=schema_events(), create_constraint=True),
         default=EventStatus.DRAFT,
@@ -101,12 +103,13 @@ class EventRevision(BaseEvents):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(json_type(), nullable=True)
 
+    file_ids: Mapped[list] = mapped_column(json_type(), nullable=False, default=list)
+
     created_by: Mapped[int] = mapped_column(Integer, ForeignKey(fk_users()), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     change_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # raise: prevents accidental lazy load from child side
     event: Mapped["Event"] = relationship(back_populates="revisions", lazy="raise")
     creator: Mapped["User"] = relationship(lazy="joined", foreign_keys=[created_by])

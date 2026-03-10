@@ -85,8 +85,6 @@ async def upload_document_files(
         )).scalar_one_or_none()
 
         if existing:
-            if 0 not in existing.media_versions:
-                existing.media_versions = [*existing.media_versions, 0]
             saved.append(existing)
             continue
 
@@ -96,7 +94,6 @@ async def upload_document_files(
 
         item = DocumentFile(
             document_id=document_id,
-            media_versions=[0],
             file_type=file_type,
             file_url=storage.get_url(dest_path),
             original_filename=filename,
@@ -112,11 +109,15 @@ async def upload_document_files(
 
 
 async def get_document_files(
-    db: AsyncSession, document_id: int, version: int,
+    db: AsyncSession, document_id: int, file_ids: list[int] | None = None,
 ) -> list[DocumentFile]:
     result = await db.execute(
         select(DocumentFile)
         .where(DocumentFile.document_id == document_id)
         .order_by(DocumentFile.sort_order)
     )
-    return [f for f in result.scalars().all() if version in (f.media_versions or [])]
+    all_files = list(result.scalars().all())
+    if file_ids is not None:
+        id_set = set(file_ids)
+        return [f for f in all_files if f.id in id_set]
+    return all_files
