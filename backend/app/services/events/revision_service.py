@@ -12,14 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 async def list_revisions(db: AsyncSession, event_id: int):
-    """
-    List revisions for a given event.
-    Only fetches id, event_id, media_version, revision_number, created_at
-    to keep the query fast and the payload small.
-    :param db: The database session
-    :param event_id: The ID of the event
-    :return: A list of revisions
-    """
     result = await db.execute(
         select(
             EventRevision.id,
@@ -62,13 +54,16 @@ async def get_revision_snapshot(
             detail=f"Revision {media_version}.{revision_number} not found",
         )
 
+    file_ids = revision.file_ids or []
+    if not file_ids:
+        return revision, []
+
     media_result = await db.execute(
         select(EventMediaItem)
         .where(EventMediaItem.event_id == event_id)
         .order_by(EventMediaItem.sort_order)
     )
-    media_items = [
-        f for f in media_result.scalars().all()
-        if media_version in (f.media_versions or [])
-    ]
+    all_items = list(media_result.scalars().all())
+    id_set = set(file_ids)
+    media_items = [f for f in all_items if f.id in id_set]
     return revision, media_items

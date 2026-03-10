@@ -73,6 +73,7 @@ def upgrade() -> None:
         sa.Column("tags", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("current_media_version", sa.Integer(), nullable=False),
         sa.Column("current_revision_number", sa.Integer(), nullable=False),
+        sa.Column("staging_file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
         sa.Column(
             "status",
             postgresql.ENUM(
@@ -117,6 +118,7 @@ def upgrade() -> None:
         sa.Column("event_dates", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("tags", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
         sa.Column("created_by", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("change_remarks", sa.Text(), nullable=True),
@@ -132,7 +134,6 @@ def upgrade() -> None:
         "files",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("event_id", sa.Integer(), nullable=False),
-        sa.Column("media_versions", postgresql.ARRAY(sa.Integer()), nullable=False),
         sa.Column(
             "file_type",
             postgresql.ENUM("IMAGE", "VIDEO", name="file_type", schema=EVENTS, create_type=False),
@@ -235,6 +236,7 @@ def upgrade() -> None:
         ),
         sa.Column("current_media_version", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("current_revision_number", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("staging_file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
         sa.Column("change_remarks", sa.Text(), nullable=True),
         sa.Column("deactivate_remarks", sa.Text(), nullable=True),
         sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
@@ -281,6 +283,7 @@ def upgrade() -> None:
             server_default="ALL",
         ),
         sa.Column("applicability_refs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
         sa.Column("created_by", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["document_id"], [f"{DOCUMENTS}.documents.id"], ondelete="CASCADE"),
@@ -295,7 +298,6 @@ def upgrade() -> None:
         "files",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("document_id", sa.Integer(), nullable=False),
-        sa.Column("media_versions", postgresql.ARRAY(sa.Integer()), nullable=False),
         sa.Column(
             "file_type",
             postgresql.ENUM("IMAGE", "DOCUMENT", name="doc_file_type", schema=DOCUMENTS, create_type=False),

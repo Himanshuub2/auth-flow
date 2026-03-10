@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models.events.event import Event, EventStatus
 from app.models.events.user import User
 from app.schemas.events.comman import APIResponse, APIResponsePaginated
-from app.schemas.events.event import EventOut, EventSavePayload, MediaFileSummary
+from app.schemas.events.event import EventOut, EventSavePayload
 from app.services.events import event_service
 from app.utils.security import get_current_user
 from pydantic import BaseModel
@@ -19,36 +19,8 @@ router = APIRouter()
 
 
 def _to_out(event: Event) -> EventOut:
-    ver = event.current_media_version
-    target_ver = ver if ver > 0 else 0
-    files = [
-        MediaFileSummary.model_validate(m)
-        for m in event.media_items
-        if target_ver in m.media_versions
-    ]
-    return EventOut(
-        id=event.id,
-        event_name=event.event_name,
-        sub_event_name=event.sub_event_name,
-        event_dates=event.event_dates,
-        description=event.description,
-        tags=event.tags,
-        current_media_version=ver,
-        current_revision_number=event.current_revision_number,
-        version_display=f"{ver}.{event.current_revision_number}",
-        status=event.status,
-        applicability_type=event.applicability_type,
-        applicability_refs=event.applicability_refs,
-        replaces_document_id=event.replaces_document_id,
-        created_by=event.created_by,
-        created_by_name=event.creator.full_name,
-        created_at=event.created_at,
-        updated_at=event.updated_at,
-        change_remarks=event.change_remarks,
-        deactivate_remarks=event.deactivate_remarks,
-        deactivated_at=event.deactivated_at,
-        files=files,
-    )
+    from app.services.events.event_service import build_event_out
+    return build_event_out(event)
 
 
 def _to_list_out(event: Event) -> EventOut:

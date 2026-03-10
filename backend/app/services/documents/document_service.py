@@ -71,7 +71,6 @@ async def save_document(
     is_new = document_id is None
 
     if is_new:
-        # FAQ: only one ACTIVE FAQ allowed
         if payload.document_type == DocumentType.FAQ and payload.status == DocumentStatus.ACTIVE:
             existing = await _get_active_faq(db, exclude_id=None)
             if existing is not None:
@@ -111,16 +110,24 @@ async def save_document(
     doc.applicability_refs = payload.applicability_refs
     doc.change_remarks = payload.change_remarks
 
+    uploaded_ids: list[int] = []
     uploaded_names: list[str] = []
     if files:
         uploaded = await upload_document_files(db, doc.id, payload.document_type, files)
+        uploaded_ids = [f.id for f in uploaded]
         uploaded_names = [f.original_filename for f in uploaded]
 
     if payload.selected_filenames is not None:
         all_names = list(dict.fromkeys([*payload.selected_filenames, *uploaded_names]))
         await _sync_staging(db, doc, all_names)
+    elif uploaded_ids:
+        existing_staging = list(doc.staging_file_ids or [])
+        for fid in uploaded_ids:
+            if fid not in existing_staging:
+                existing_staging.append(fid)
+        doc.staging_file_ids = existing_staging
 
-    staging_files = await _get_files_for_version(db, doc.id, 0)
+    staging_files = _get_staging_files(doc)
     if payload.status == DocumentStatus.ACTIVE:
         validate_file_count(len(staging_files))
         if doc.document_type == DocumentType.FAQ:
@@ -167,7 +174,7 @@ async def get_document_for_detail(db: AsyncSession, document_id: int) -> Documen
 
 
 async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -> DocumentOut:
-    """Item detail: full Document + User.full_name only; files: only required columns (6 < 7)."""
+    """Item detail: full Document + User.full_name only; files filtered by current version."""
     row = await db.execute(
         select(Document, User.full_name.label("created_by_name"))
         .join(User, Document.created_by == User.id)
@@ -178,16 +185,19 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     doc, created_by_name = one[0], one[1]
     ver = doc.current_media_version
-    target_ver = ver if ver > 0 else 0
 
-    version_files = await _get_files_for_version(db, document_id, target_ver)
+    file_ids = await _get_file_ids_for_version(db, doc, ver)
+    all_files = await _get_all_files(db, document_id)
+    file_by_id = {f.id: f for f in all_files}
+    version_files = [file_by_id[fid] for fid in file_ids if fid in file_by_id]
+
     files = [
         DocumentFileSummary(
             id=f.id,
             original_filename=f.original_filename,
             file_type=f.file_type,
             file_url=f.file_url,
-            media_versions=f.media_versions,
+            media_versions=_compute_media_versions(f.id, doc),
             file_size_bytes=f.file_size_bytes,
         )
         for f in version_files
@@ -274,7 +284,7 @@ async def toggle_document_status(db: AsyncSession, document_id: int, user: User 
     if doc.document_type == DocumentType.FAQ:
         existing = (await db.execute(select(Document)
         .where(
-            Document.document_type == DocumentType.FAQ, 
+            Document.document_type == DocumentType.FAQ,
             Document.status == DocumentStatus.ACTIVE,
             Document.id != document_id,
         )
@@ -376,6 +386,17 @@ async def get_revision(
     return rev
 
 
+def _compute_media_versions(file_id: int, doc: Document) -> list[int]:
+    """Compute the media_versions list for a file based on staging and revisions."""
+    versions: list[int] = []
+    if file_id in (doc.staging_file_ids or []):
+        versions.append(0)
+    for rev in (doc.revisions or []):
+        if file_id in (rev.file_ids or []):
+            versions.append(rev.media_version)
+    return sorted(set(versions))
+
+
 def build_document_out(
     doc: Document,
     linked_document_details: list[LinkedDocumentDetail] | None = None,
@@ -383,10 +404,19 @@ def build_document_out(
     """Build DocumentOut from loaded Document (with files and creator)."""
     ver = doc.current_media_version
     target_ver = ver if ver > 0 else 0
+    target_file_ids = _get_file_ids_for_version_sync(doc, target_ver)
+    file_by_id = {f.id: f for f in doc.files}
     files = [
-        DocumentFileSummary.model_validate(f)
-        for f in doc.files
-        if target_ver in f.media_versions
+        DocumentFileSummary(
+            id=f.id,
+            original_filename=f.original_filename,
+            file_type=f.file_type,
+            file_url=f.file_url,
+            media_versions=_compute_media_versions(f.id, doc),
+            file_size_bytes=f.file_size_bytes,
+        )
+        for fid in target_file_ids
+        if (f := file_by_id.get(fid)) is not None
     ]
     return DocumentOut(
         id=doc.id,
@@ -427,13 +457,14 @@ async def get_revision_snapshot(
 ) -> tuple[DocumentRevision, list[DocumentFile]]:
     """Load document revision and files at that media version."""
     revision = await get_revision(db, document_id, media_version, revision_number)
-    files = await _get_files_for_version(db, document_id, media_version)
+    all_files = await _get_all_files(db, document_id)
+    file_by_id = {f.id: f for f in all_files}
+    files = [file_by_id[fid] for fid in (revision.file_ids or []) if fid in file_by_id]
     return revision, files
 
 
 
 async def _get_active_faq(db: AsyncSession, exclude_id: int | None = None) -> Document | None:
-    """Return the active FAQ document if any. Optionally exclude a document id (e.g. current doc being activated)."""
     q = select(Document).where(
         Document.document_type == DocumentType.FAQ,
         Document.status == DocumentStatus.ACTIVE,
@@ -449,7 +480,6 @@ async def _validate_linked_ids(
     linked_ids: list[int],
     current_id: int,
 ) -> None:
-    """Validate linked document ids: max 6, no self, must exist and be published/active. Any document type allowed."""
     if not linked_ids:
         return
     if len(linked_ids) > 6:
@@ -491,6 +521,11 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: int)
     if existing:
         return existing
 
+    parent_file_ids = await _get_file_ids_for_version(db, parent, parent.current_media_version)
+
+    parent_files = await _get_all_files(db, parent.id)
+    parent_file_by_id = {f.id: f for f in parent_files}
+
     draft = Document(
         name=parent.name,
         document_type=parent.document_type,
@@ -513,17 +548,24 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: int)
     db.add(draft)
     await db.flush()
 
-    parent_files = await _get_files_for_version(db, parent.id, parent.current_media_version)
-    for f in parent_files:
-        db.add(DocumentFile(
+    new_staging_ids: list[int] = []
+    for fid in parent_file_ids:
+        pf = parent_file_by_id.get(fid)
+        if not pf:
+            continue
+        new_file = DocumentFile(
             document_id=draft.id,
-            media_versions=[0],
-            file_type=f.file_type,
-            file_url=f.file_url,
-            original_filename=f.original_filename,
-            file_size_bytes=f.file_size_bytes,
-            sort_order=f.sort_order,
-        ))
+            file_type=pf.file_type,
+            file_url=pf.file_url,
+            original_filename=pf.original_filename,
+            file_size_bytes=pf.file_size_bytes,
+            sort_order=pf.sort_order,
+        )
+        db.add(new_file)
+        await db.flush()
+        new_staging_ids.append(new_file.id)
+
+    draft.staging_file_ids = new_staging_ids
     await db.flush()
     return draft
 
@@ -533,30 +575,14 @@ async def _publish_document(db: AsyncSession, doc: Document) -> None:
     if doc.current_media_version == 0:
         doc.current_media_version = 1
         doc.current_revision_number = 0
-        new_ver = 1
     else:
         if await _version_should_bump(db, doc):
             doc.current_media_version += 1
             doc.current_revision_number = 0
         else:
             doc.current_revision_number += 1
-        new_ver = doc.current_media_version
 
-    all_files = await _get_all_files(db, doc.id)
-    staging_ids: set[int] = set()
-    for f in all_files:
-        versions = f.media_versions or []
-        if 0 in versions:
-            staging_ids.add(f.id)
-            clean = [v for v in versions if v != 0]
-            if new_ver not in clean:
-                clean.append(new_ver)
-            f.media_versions = clean
-
-    for f in all_files:
-        versions = f.media_versions or []
-        if f.id not in staging_ids and 0 in versions:
-            f.media_versions = [v for v in versions if v != 0]
+    published_file_ids = list(doc.staging_file_ids or [])
 
     db.add(DocumentRevision(
         document_id=doc.id,
@@ -568,13 +594,15 @@ async def _publish_document(db: AsyncSession, doc: Document) -> None:
         summary=doc.summary,
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
+        file_ids=published_file_ids,
         created_by=doc.created_by,
     ))
+
+    doc.staging_file_ids = []
     doc.status = DocumentStatus.ACTIVE
 
 
 async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
-    # Load parent with revisions (like events) so we can move revisions to draft and set parent INACTIVE
     result = await db.execute(
         select(Document)
         .where(Document.id == draft.replaces_document_id)
@@ -586,9 +614,7 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
 
     last_rev = _find_latest_revision(parent)
     name_changed = (draft.name != last_rev.name) if last_rev else True
-    files_changed = await _files_differ_between(
-        db, draft.id, 0, parent.id, parent.current_media_version,
-    )
+    files_changed = await _files_differ_between(db, draft, 0, parent, parent.current_media_version)
 
     if name_changed or files_changed:
         draft.current_media_version = parent.current_media_version + 1
@@ -597,16 +623,7 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
         draft.current_media_version = parent.current_media_version
         draft.current_revision_number = parent.current_revision_number + 1
 
-    new_ver = draft.current_media_version
-
-    draft_files = await _get_all_files(db, draft.id)
-    for f in draft_files:
-        versions = f.media_versions or []
-        if 0 in versions:
-            clean = [v for v in versions if v != 0]
-            if new_ver not in clean:
-                clean.append(new_ver)
-            f.media_versions = clean
+    published_file_ids = list(draft.staging_file_ids or [])
 
     for rev in parent.revisions:
         rev.document_id = draft.id
@@ -617,7 +634,7 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
 
     db.add(DocumentRevision(
         document_id=draft.id,
-        media_version=new_ver,
+        media_version=draft.current_media_version,
         revision_number=draft.current_revision_number,
         name=draft.name,
         document_type=draft.document_type,
@@ -625,12 +642,14 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
         summary=draft.summary,
         applicability_type=draft.applicability_type,
         applicability_refs=draft.applicability_refs,
+        file_ids=published_file_ids,
         created_by=draft.created_by,
     ))
 
     parent.status = DocumentStatus.INACTIVE
     draft.status = DocumentStatus.ACTIVE
     draft.replaces_document_id = None
+    draft.staging_file_ids = []
 
     await db.flush()
     await db.refresh(draft)
@@ -650,7 +669,7 @@ async def _version_should_bump(db: AsyncSession, doc: Document) -> bool:
         return True
     if doc.name != last_rev.name:
         return True
-    return await _files_differ_between(db, doc.id, 0, doc.id, doc.current_media_version)
+    return await _files_differ_between(db, doc, 0, doc, doc.current_media_version)
 
 
 async def _get_all_files(db: AsyncSession, document_id: int) -> list[DocumentFile]:
@@ -662,42 +681,71 @@ async def _get_all_files(db: AsyncSession, document_id: int) -> list[DocumentFil
     return list(result.scalars().all())
 
 
-async def _get_files_for_version(
-    db: AsyncSession, document_id: int, version: int,
-) -> list[DocumentFile]:
-    all_files = await _get_all_files(db, document_id)
-    return [f for f in all_files if version in (f.media_versions or [])]
+def _get_staging_files(doc: Document) -> list[int]:
+    """Return list of file IDs currently in staging."""
+    return list(doc.staging_file_ids or [])
+
+
+def _get_file_ids_for_version_sync(doc: Document, version: int) -> list[int]:
+    """Sync version: get file IDs for a version from loaded doc (staging or revisions)."""
+    if version == 0:
+        return list(doc.staging_file_ids or [])
+    for rev in (doc.revisions or []):
+        if rev.media_version == version:
+            return list(rev.file_ids or [])
+    return list(doc.staging_file_ids or [])
+
+
+async def _get_file_ids_for_version(db: AsyncSession, doc: Document, version: int) -> list[int]:
+    """Get file IDs for a version. For staging (0), use doc.staging_file_ids. For published, find revision."""
+    if version == 0:
+        return list(doc.staging_file_ids or [])
+    result = await db.execute(
+        select(DocumentRevision.file_ids)
+        .where(
+            DocumentRevision.document_id == doc.id,
+            DocumentRevision.media_version == version,
+        )
+        .order_by(DocumentRevision.revision_number.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return list(row)
+    return list(doc.staging_file_ids or [])
 
 
 async def _get_names_for_version(
-    db: AsyncSession, document_id: int, version: int,
+    db: AsyncSession, doc: Document, version: int,
 ) -> set[str]:
-    files = await _get_files_for_version(db, document_id, version)
-    return {f.original_filename for f in files}
+    file_ids = await _get_file_ids_for_version(db, doc, version)
+    if not file_ids:
+        return set()
+    all_files = await _get_all_files(db, doc.id)
+    file_by_id = {f.id: f for f in all_files}
+    return {file_by_id[fid].original_filename for fid in file_ids if fid in file_by_id}
 
 
 async def _files_differ_between(
     db: AsyncSession,
-    doc_id_a: int, ver_a: int,
-    doc_id_b: int, ver_b: int,
+    doc_a: Document, ver_a: int,
+    doc_b: Document, ver_b: int,
 ) -> bool:
-    names_a = await _get_names_for_version(db, doc_id_a, ver_a)
-    names_b = await _get_names_for_version(db, doc_id_b, ver_b)
+    names_a = await _get_names_for_version(db, doc_a, ver_a)
+    names_b = await _get_names_for_version(db, doc_b, ver_b)
     return names_a != names_b
 
 
 async def _sync_staging(
     db: AsyncSession, doc: Document, selected_names: list[str],
 ) -> None:
+    """Make staging match exactly the selected filenames."""
     desired = set(selected_names)
     all_files = await _get_all_files(db, doc.id)
-
-    for f in all_files:
-        versions = f.media_versions or []
-        in_staging = 0 in versions
-        wanted = f.original_filename in desired
-
-        if wanted and not in_staging:
-            f.media_versions = [*versions, 0]
-        elif not wanted and in_staging:
-            f.media_versions = [v for v in versions if v != 0]
+    name_to_file = {f.original_filename: f for f in all_files}
+    new_staging: list[int] = []
+    for name in selected_names:
+        f = name_to_file.get(name)
+        if f:
+            new_staging.append(f.id)
+    doc.staging_file_ids = new_staging

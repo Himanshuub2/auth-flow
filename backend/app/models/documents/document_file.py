@@ -8,7 +8,6 @@ from app.database import BaseDocuments
 from app.db_utils import (
     documents_table,
     fk_documents,
-    media_versions_type,
     schema_documents,
 )
 
@@ -26,8 +25,6 @@ class DocumentFile(BaseDocuments):
     document_id: Mapped[int] = mapped_column(
         Integer, ForeignKey(fk_documents("documents"), ondelete="CASCADE"), nullable=False,
     )
-
-    media_versions: Mapped[list[int]] = mapped_column(media_versions_type(), nullable=False, default=list)
 
     file_type: Mapped[DocumentFileType] = mapped_column(
         Enum(DocumentFileType, name="doc_file_type", schema=schema_documents(), create_constraint=True),

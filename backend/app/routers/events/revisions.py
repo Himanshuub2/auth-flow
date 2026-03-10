@@ -59,6 +59,22 @@ async def get_revision(
     )
     data = RevisionDetailOut(
         revision=_rev_to_out(revision),
-        media_items=[MediaItemOut.model_validate(m) for m in media_items],
+        media_items=[
+            MediaItemOut(
+                id=m.id,
+                event_id=m.event_id,
+                media_versions=[media_version],
+                file_type=m.file_type,
+                file_url=m.file_url,
+                thumbnail_url=m.thumbnail_url,
+                caption=m.caption,
+                description=m.description,
+                sort_order=m.sort_order,
+                file_size_bytes=m.file_size_bytes,
+                original_filename=m.original_filename,
+                created_at=m.created_at,
+            )
+            for m in media_items
+        ],
     )
     return APIResponse(message="Revision fetched", status_code=200, status="success", data=data)
