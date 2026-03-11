@@ -153,3 +153,22 @@ class DocumentRevisionDetailOut(BaseModel):
     """Revision snapshot: revision metadata + files at that media version."""
     revision: DocumentRevisionOut
     files: list[DocumentFileSummary]
+
+
+class DocumentHubItem(BaseModel):
+    id: int
+    name: str
+    document_type: str
+
+    model_config = {"from_attributes": True}
+
+
+class DocumentHubCategory(BaseModel):
+    document_type: str
+    total: int
+    new_count: int = 0  # Documents created in the last 2 days
+    items: list[DocumentHubItem]
+
+
+class DocumentHubOut(BaseModel):
+    categories: list[DocumentHubCategory]

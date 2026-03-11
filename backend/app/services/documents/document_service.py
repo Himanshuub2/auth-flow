@@ -1,21 +1,28 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import String as SAString, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.documents.document import (
+    ApplicabilityType,
     Document,
     DocumentRevision,
     DocumentStatus,
     DocumentType,
+    DOCUMENT_TYPE_LABELS,
+    LABEL_TO_DOCUMENT_TYPE,
     ROLE_DOCUMENT_TYPES,
     document_type_to_label,
 )
 from app.models.documents.document_file import DocumentFile
 from app.models.events.user import User
 from app.schemas.documents.document import (
+    DocumentHubCategory,
+    DocumentHubItem,
+    DocumentHubOut,
     DocumentOut,
     DocumentSavePayload,
     DocumentFileSummary,
@@ -355,6 +362,146 @@ async def get_linked_document_details(
         for row in result.all()
     ]
 
+
+# ── Knowledge Hub ────────────────────────────────────────────────────────
+
+HUB_NEW_DAYS = 2  # Documents created in the last N days are shown as "new"
+
+
+def _apply_applicability_filter(query, user: User, applicability: str | None):
+
+    if not applicability or applicability.upper() == "ALL":
+        return query
+
+    if applicability.upper() == "DIVISION":
+        if not user.division_cluster:
+            return query.where(Document.applicability_type == ApplicabilityType.ALL)
+        return query.where(
+            or_(
+                Document.applicability_type == ApplicabilityType.ALL,
+                (Document.applicability_type == ApplicabilityType.DIVISION)
+                & func.cast(Document.applicability_refs, SAString).contains(user.division_cluster),
+            )
+        )
+
+    if applicability.upper() == "EMPLOYEE":
+        return query.where(
+            or_(
+                Document.applicability_type == ApplicabilityType.ALL,
+                (Document.applicability_type == ApplicabilityType.EMPLOYEE)
+                & func.cast(Document.applicability_refs, SAString).contains(str(user.id)),
+            )
+        )
+
+    return query
+
+
+def _apply_search_filter(query, search: str | None):
+    if not search:
+        return query
+    like = f"%{search}%"
+    return query.where(
+        or_(
+            Document.name.ilike(like),
+            Document.summary.ilike(like),
+            func.cast(Document.tags, SAString).ilike(like),
+        )
+    )
+
+
+def _resolve_doc_types(raw: list[str] | None) -> list[DocumentType]:
+    if not raw:
+        return list(DocumentType)
+    result: list[DocumentType] = []
+    for dt in raw:
+        dt_stripped = dt.strip()
+        try:
+            result.append(DocumentType(dt_stripped))
+            continue
+        except ValueError:
+            pass
+        if dt_stripped in LABEL_TO_DOCUMENT_TYPE:
+            result.append(LABEL_TO_DOCUMENT_TYPE[dt_stripped])
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid document type: {dt_stripped}",
+            )
+    return result
+
+
+def _hub_query_for_type(dt: DocumentType, user: User, applicability: str | None, search: str | None):
+    q = (
+        select(Document.id, Document.name, Document.document_type)
+        .where(
+            Document.status == DocumentStatus.ACTIVE,
+            Document.replaces_document_id.is_(None),
+            Document.document_type == dt,
+        )
+    )
+    q = _apply_applicability_filter(q, user, applicability)
+    q = _apply_search_filter(q, search)
+    return q
+
+
+async def get_document_hub(
+    db: AsyncSession,
+    user: User,
+    *,
+    doc_types: list[str] | None = None,
+    page: int = 1,
+    page_size: int = 10,
+    applicability: str | None = None,
+    search: str | None = None,
+) -> DocumentHubOut:
+    type_enums = _resolve_doc_types(doc_types)
+    categories: list[DocumentHubCategory] = []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=HUB_NEW_DAYS)
+
+    for dt in type_enums:
+        q = _hub_query_for_type(dt, user, applicability, search)
+
+        count_q = select(func.count()).select_from(q.subquery())
+        total = (await db.execute(count_q)).scalar() or 0
+
+        new_count_q = (
+            select(Document)
+            .where(
+                Document.status == DocumentStatus.ACTIVE,
+                Document.replaces_document_id.is_(None),
+                Document.document_type == dt,
+                Document.created_at >= cutoff,
+            )
+        )
+        new_count_q = _apply_applicability_filter(new_count_q, user, applicability)
+        new_count_q = _apply_search_filter(new_count_q, search)
+        new_count = (await db.execute(select(func.count()).select_from(new_count_q.subquery()))).scalar() or 0
+
+        rows = (await db.execute(
+            q.order_by(Document.updated_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )).all()
+
+        items = [
+            DocumentHubItem(
+                id=r.id,
+                name=r.name,
+                document_type=document_type_to_label(r.document_type.value),
+            )
+            for r in rows
+        ]
+
+        if items or doc_types:
+            categories.append(DocumentHubCategory(
+                document_type=DOCUMENT_TYPE_LABELS.get(dt, dt.value),
+                total=total,
+                new_count=new_count,
+                items=items,
+            ))
+
+    return DocumentHubOut(categories=categories)
 
 
 async def list_revisions(db: AsyncSession, document_id: int) -> list[DocumentRevision]:

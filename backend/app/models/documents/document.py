@@ -27,6 +27,7 @@ class DocumentType(str, enum.Enum):
     EWS = "EWS"
     FAQ = "FAQ"
     LATEST_NEWS_AND_ANNOUNCEMENTS = "LATEST_NEWS_AND_ANNOUNCEMENTS"
+    FLYER = "FLYER"
 
 
 DOCUMENT_TYPE_LABELS: dict[DocumentType, str] = {
@@ -37,6 +38,7 @@ DOCUMENT_TYPE_LABELS: dict[DocumentType, str] = {
     DocumentType.EWS: "EWS",
     DocumentType.FAQ: "FAQ",
     DocumentType.LATEST_NEWS_AND_ANNOUNCEMENTS: "Latest News and Announcements",
+    DocumentType.FLYER: "Flyer",
 }
 LABEL_TO_DOCUMENT_TYPE: dict[str, DocumentType] = {v: k for k, v in DOCUMENT_TYPE_LABELS.items()}
 
@@ -63,6 +65,7 @@ ROLE_DOCUMENT_TYPES: dict[str, list[DocumentType]] = {
         DocumentType.EWS,
         DocumentType.FAQ,
         DocumentType.LATEST_NEWS_AND_ANNOUNCEMENTS,
+        DocumentType.FLYER,
     ],
 }
 
