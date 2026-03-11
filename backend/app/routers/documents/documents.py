@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cache import cache_delete
+from app.cache import cache_delete, cache_get, cache_set
+from app.config import settings
 from app.database import get_db
 from app.models.documents.document import Document, DocumentStatus, DocumentType, LABEL_TO_DOCUMENT_TYPE, document_type_to_label
 from app.models.events.user import User
 from app.schemas.documents.document import (
     DeactivatePayload,
+    DocumentHubOut,
     DocumentOut,
     DocumentRevisionOut,
     DocumentSavePayload,
@@ -125,6 +127,44 @@ async def list_documents(
         total=total,
         page=page,
         page_size=page_size,
+    )
+
+
+@router.get("/hub", response_model=APIResponse)
+async def document_hub(
+    doc_types: list[str] | None = Query(None, description="Document type(s) — enum or label. Omit for all types."),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    applicability: str | None = Query(None, description="ALL | DIVISION | EMPLOYEE"),
+    search: str | None = Query(None, description="Search name, summary, tags"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    cache_key = f"doc_hub:{user.id}:{doc_types}:{page}:{page_size}:{applicability}:{search}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return APIResponse(
+            message="Documents fetched",
+            status_code=200,
+            status="success",
+            data=cached,
+        )
+
+    hub = await document_service.get_document_hub(
+        db,
+        user,
+        doc_types=doc_types,
+        page=page,
+        page_size=page_size,
+        applicability=applicability,
+        search=search,
+    )
+    await cache_set(cache_key, hub.model_dump(), ttl=settings.ITEM_DETAIL_CACHE_TTL_SECONDS)
+    return APIResponse(
+        message="Documents fetched",
+        status_code=200,
+        status="success",
+        data=hub,
     )
 
 
