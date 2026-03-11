@@ -13,11 +13,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TEST_USER = {
-    "email": "admin@eventflow.local",
-    "password": "admin123",
-    "full_name": "Admin User",
+    "email": "divyanshu@test.com",
+    "full_name": "Divyanshu",
     "division_cluster": "Marketing & Sales",
     "designation": "DVM",
+    "policy_hub_admin": True,
+    "knowledge_hub_admin": True,
+    "is_admin": True,
 }
 
 
@@ -29,11 +31,12 @@ async def seed() -> None:
         if not existing_user:
             user = User(
                 email=TEST_USER["email"],
-                password_hash=hash_password(TEST_USER["password"]),
                 full_name=TEST_USER["full_name"],
                 division_cluster=TEST_USER["division_cluster"],
                 designation=TEST_USER["designation"],
-                is_admin=True,
+                policy_hub_admin=TEST_USER["policy_hub_admin"],
+                knowledge_hub_admin=TEST_USER["knowledge_hub_admin"],
+                is_admin=TEST_USER["is_admin"],
             )
             session.add(user)
             logger.info("Added test user: %s", TEST_USER["email"])

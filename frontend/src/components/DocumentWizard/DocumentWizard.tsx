@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   createDocument,
   updateDocument,
+  getDocument,
   getDocumentTypes,
   getLegislation,
   getSubLegislation,
@@ -10,6 +11,7 @@ import {
   getDesignations,
 } from "../../api";
 import TagInput from "../common/TagInput";
+import MultiSelect from "../common/MultiSelect";
 import type {
   DocumentData,
   SaveDocumentPayload,
@@ -20,6 +22,16 @@ import type {
   LinkedDocumentDetail,
   ApplicabilityType,
 } from "../../types";
+
+/** Same shape as events: { divisions?, designations?, employees? }. Normalize legacy division_ids/designation_ids. */
+function normalizeApplicabilityRefs(refs: Record<string, number[]> | null | undefined): Record<string, number[]> {
+  if (!refs || typeof refs !== "object") return {};
+  return {
+    divisions: refs.divisions ?? refs.division_ids ?? [],
+    designations: refs.designations ?? refs.designation_ids ?? [],
+    employees: refs.employees ?? [],
+  };
+}
 
 interface Props {
   editDoc?: DocumentData | null;
@@ -76,7 +88,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         download_allowed: editDoc.download_allowed,
         linked_document_ids: editDoc.linked_document_ids ?? [],
         applicability_type: editDoc.applicability_type,
-        applicability_refs: editDoc.applicability_refs ?? {},
+        applicability_refs: normalizeApplicabilityRefs(editDoc.applicability_refs),
         change_remarks: "",
       };
     }
@@ -87,6 +99,18 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
   const [removedExistingIds, setRemovedExistingIds] = useState<number[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (editDoc) {
+      // Refetch full detail (including files) so existing files are never missing when appending new ones
+      getDocument(editDoc.id)
+        .then((res) => {
+          const data = (res.data as { data?: DocumentData })?.data;
+          if (data && setEditDoc) setEditDoc(data);
+        })
+        .catch(() => {});
+    }
+  }, [editDoc?.id]);
 
   useEffect(() => {
     if (editDoc) {
@@ -102,7 +126,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         download_allowed: editDoc.download_allowed,
         linked_document_ids: editDoc.linked_document_ids ?? [],
         applicability_type: editDoc.applicability_type,
-        applicability_refs: editDoc.applicability_refs ?? {},
+        applicability_refs: normalizeApplicabilityRefs(editDoc.applicability_refs),
         change_remarks: "",
       });
       setFiles([]);
@@ -116,7 +140,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
       setRemovedExistingIds([]);
       setLinkedItems([]);
     }
-  }, [editDoc?.id]);
+  }, [editDoc]);
 
   const [docTypes, setDocTypes] = useState<DocumentTypeOption[]>([]);
   const [legislations, setLegislations] = useState<LegislationOption[]>([]);
@@ -198,7 +222,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         download_allowed: form.download_allowed,
         linked_document_ids: isFAQ ? [] : form.linked_document_ids,
         applicability_type: form.applicability_type,
-        applicability_refs: form.applicability_refs,
+        applicability_refs: form.applicability_type === "ALL" ? null : form.applicability_refs,
         status,
         selected_filenames: allFilenames,
         change_remarks: form.change_remarks || null,
@@ -208,7 +232,7 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         const res = await updateDocument(editDoc.id, payload, files.length ? files : undefined);
         const body = res.data as any;
         const saved: DocumentData | undefined = body?.data;
-        if (saved && saved.id !== editDoc.id && setEditDoc) {
+        if (saved && setEditDoc) {
           setEditDoc(saved);
         }
         if (status === "ACTIVE") onSaved();
@@ -245,14 +269,12 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
     setForm((prev) => ({ ...prev, linked_document_ids: next.map((i) => i.id) }));
   };
 
-  const toggleApplicabilityRef = (key: string, id: number) => {
-    setForm((prev) => {
-      const current = prev.applicability_refs[key] ?? [];
-      const next = current.includes(id)
-        ? current.filter((x) => x !== id)
-        : [...current, id];
-      return { ...prev, applicability_refs: { ...prev.applicability_refs, [key]: next } };
-    });
+  const setApplicabilityType = (type: ApplicabilityType) => {
+    setForm((prev) => ({
+      ...prev,
+      applicability_type: type,
+      applicability_refs: type === "ALL" ? {} : prev.applicability_refs,
+    }));
   };
 
   return (
@@ -421,40 +443,78 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
           </div>
         )}
 
-        {/* Step 2 (or 1 for FAQ): Applicability */}
+        {/* Step 2 (or 1 for FAQ): Applicability — same as Events (divisions, designations, employees) */}
         {step === (isFAQ ? 1 : 2) && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <label>Applicability</label>
-            <div style={{ display: "flex", gap: 12 }}>
-              {(["ALL", "DIVISION", "EMPLOYEE"] as ApplicabilityType[]).map((t) => (
-                <label key={t}>
-                  <input type="radio" name="applicability" value={t} checked={form.applicability_type === t} onChange={() => set("applicability_type", t)} />
-                  {t === "ALL" ? "All Division Clusters" : t === "DIVISION" ? "By Division Cluster/s" : "By Employee/s"}
+            <h3 style={{ marginTop: 0 }}>Applicability</h3>
+            <div style={{ display: "flex", gap: 24, marginBottom: 16 }}>
+              {(["ALL", "DIVISION", "EMPLOYEE"] as const).map((type) => (
+                <label key={type} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="applicabilityDoc"
+                    checked={form.applicability_type === type}
+                    onChange={() => setApplicabilityType(type)}
+                  />
+                  {type === "ALL" ? "Applicable to All" : type === "DIVISION" ? "By Division Cluster/s" : "By Employee/s"}
                 </label>
               ))}
             </div>
 
             {form.applicability_type === "DIVISION" && (
-              <div>
-                <label>Division Cluster</label>
-                {divisions.map((d) => (
-                  <label key={d.id} style={{ display: "block" }}>
-                    <input type="checkbox" checked={(form.applicability_refs.division_ids ?? []).includes(d.id)} onChange={() => toggleApplicabilityRef("division_ids", d.id)} />
-                    {d.name}
-                  </label>
-                ))}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <MultiSelect
+                  label="Division Cluster"
+                  options={divisions}
+                  selected={form.applicability_refs.divisions || []}
+                  onChange={(ids) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      applicability_refs: { ...prev.applicability_refs, divisions: ids },
+                    }))
+                  }
+                />
+                <MultiSelect
+                  label="Designation"
+                  options={designations}
+                  selected={form.applicability_refs.designations || []}
+                  onChange={(ids) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      applicability_refs: { ...prev.applicability_refs, designations: ids },
+                    }))
+                  }
+                />
               </div>
             )}
 
-            {(form.applicability_type === "DIVISION" || form.applicability_type === "EMPLOYEE") && (
+            {form.applicability_type === "EMPLOYEE" && (
               <div>
-                <label>Designation</label>
-                {designations.map((d) => (
-                  <label key={d.id} style={{ display: "block" }}>
-                    <input type="checkbox" checked={(form.applicability_refs.designation_ids ?? []).includes(d.id)} onChange={() => toggleApplicabilityRef("designation_ids", d.id)} />
-                    {d.name}
-                  </label>
-                ))}
+                <label style={{ fontWeight: 600, fontSize: 14 }}>Employee IDs (comma-separated)</label>
+                <input
+                  value={(form.applicability_refs.employees || []).join(", ")}
+                  onChange={(e) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      applicability_refs: {
+                        ...prev.applicability_refs,
+                        employees: e.target.value
+                          .split(",")
+                          .map((s) => parseInt(s.trim(), 10))
+                          .filter((n) => !isNaN(n)),
+                      },
+                    }))
+                  }
+                  style={{
+                    width: "100%",
+                    padding: "8px 10px",
+                    border: "1px solid #ccc",
+                    borderRadius: 4,
+                    marginTop: 4,
+                    boxSizing: "border-box",
+                  }}
+                  placeholder="e.g. 1, 2, 3"
+                />
               </div>
             )}
           </div>

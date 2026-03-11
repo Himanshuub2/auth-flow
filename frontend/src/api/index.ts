@@ -28,6 +28,11 @@ export const register = (email: string, password: string, full_name: string) =>
 
 // ---- Events ----
 
+/** Omit Content-Type so axios sets multipart/form-data with boundary (required for file uploads). */
+function formDataHeaders(): Record<string, string> {
+  return {};
+}
+
 function buildFormData(payload: SaveEventPayload, files?: File[]): FormData {
   const fd = new FormData();
   fd.append("data", JSON.stringify(payload));
@@ -39,12 +44,12 @@ function buildFormData(payload: SaveEventPayload, files?: File[]): FormData {
 
 export const createEvent = (payload: SaveEventPayload, files?: File[]) =>
   client.post<EventData>("/events/", buildFormData(payload, files), {
-    headers: { "Content-Type": "multipart/form-data" },
+    headers: formDataHeaders(),
   });
 
 export const updateEvent = (id: number, payload: SaveEventPayload, files?: File[]) =>
   client.put<EventData>(`/events/${id}`, buildFormData(payload, files), {
-    headers: { "Content-Type": "multipart/form-data" },
+    headers: formDataHeaders(),
   });
 
 export const listEvents = (page = 1, pageSize = 20, status?: string) =>
@@ -90,12 +95,12 @@ function buildDocFormData(payload: SaveDocumentPayload, files?: File[]): FormDat
 
 export const createDocument = (payload: SaveDocumentPayload, files?: File[]) =>
   client.post<DocumentData>("/documents/", buildDocFormData(payload, files), {
-    headers: { "Content-Type": "multipart/form-data" },
+    headers: formDataHeaders(),
   });
 
 export const updateDocument = (id: number, payload: SaveDocumentPayload, files?: File[]) =>
   client.put<DocumentData>(`/documents/${id}`, buildDocFormData(payload, files), {
-    headers: { "Content-Type": "multipart/form-data" },
+    headers: formDataHeaders(),
   });
 
 export const listDocuments = (page = 1, pageSize = 20, status?: string, documentType?: string) =>

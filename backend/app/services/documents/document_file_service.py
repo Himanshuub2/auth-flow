@@ -118,8 +118,8 @@ async def get_document_files(
         select(DocumentFile)
         .where(
             DocumentFile.document_id == document_id,
-            DocumentFile.media_versions.any(version),
+            DocumentFile.media_versions.contains([version]),
         )
         .order_by(DocumentFile.sort_order)
     )
-    return list(result.scalars().all())
+    return [f for f in result.scalars().all() if version in (f.media_versions or [])]
