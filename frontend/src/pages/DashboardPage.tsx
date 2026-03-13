@@ -23,11 +23,11 @@ export default function DashboardPage() {
 
   const openCreateEvent = () => { setEditEvent(null); setShowWizard(true); };
   const openEditEvent = (ev: EventData) => { setEditEvent(ev); setShowWizard(true); };
-  const handleEventSaved = () => { setShowWizard(false); setRefreshKey((k) => k + 1); };
+  const handleEventSaved = () => {  setRefreshKey((k) => k + 1); };
 
   const openCreateDoc = () => { setEditDoc(null); setShowDocWizard(true); };
   const openEditDoc = (d: DocumentData) => { setEditDoc(d); setShowDocWizard(true); };
-  const handleDocSaved = () => { setShowDocWizard(false); setRefreshKey((k) => k + 1); };
+  const handleDocSaved = () => {  setRefreshKey((k) => k + 1); };
 
   const logout = () => {
     localStorage.removeItem("token");
@@ -94,3 +94,10 @@ const logoutBtn: React.CSSProperties = {
   cursor: "pointer",
   fontSize: 13,
 };
+// const d = 
+// {"name":"TESTING EVETN","document_type":"Latest News and Announcements",
+//   "tags":["dfsadsaf"],"summary":"dfsadfs","legislation_id":9,
+//   "sub_legislation_id":null,"version":1,"next_review_date":null,"download_allowed":true,
+//   "linked_document_ids":[2],"applicability_type":"EMPLOYEE","applicability_refs":{"employees":[12345]},
+//   "status":"ACTIVE",
+// "selected_filenames":["IMG_20260311_164939.jpg","IMG20260306194517.jpg"],"change_remarks":null}

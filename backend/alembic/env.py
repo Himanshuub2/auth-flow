@@ -3,13 +3,14 @@ from logging.config import fileConfig
 from sqlalchemy import create_engine, pool
 from alembic import context
 
-from app.config import settings
-from app.database import Base
-from app.models.events import Event, EventMediaItem
-from app.models.events.user import User
-from app.models.documents import  Document, DocumentRevision
-from app.models.documents.document_file import DocumentFile
-from app.models.documents.legislation import Legislation, SubLegislation
+from config import settings
+from database import Base
+from models.events import Event, EventMediaItem
+from models.events.user import User
+from models.documents import Document, DocumentRevision
+from models.documents.document_file import DocumentFile
+from models.documents.legislation import Legislation, SubLegislation
+
 config = context.config
 
 if config.config_file_name is not None:
@@ -17,8 +18,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-# Alembic needs a sync driver — swap asyncpg for psycopg2
-sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
+sync_url = settings.DATABASE_URL.replace("+psycopg", "+psycopg2")
 
 
 def run_migrations_offline() -> None:

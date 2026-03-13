@@ -4,7 +4,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.models.documents.document import DocumentStatus
+from models.documents.document import DocumentStatus
 
 
 def _minimal_pdf_bytes() -> bytes:

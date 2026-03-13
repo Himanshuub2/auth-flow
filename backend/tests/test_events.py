@@ -4,7 +4,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.models.events.event import EventStatus
+from models.events.event import EventStatus
 
 
 def _event_payload(

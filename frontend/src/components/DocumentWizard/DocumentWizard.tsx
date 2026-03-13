@@ -217,7 +217,6 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
         summary: form.summary || null,
         legislation_id: form.legislation_id,
         sub_legislation_id: form.sub_legislation_id,
-        version: form.version,
         next_review_date: form.next_review_date || null,
         download_allowed: form.download_allowed,
         linked_document_ids: isFAQ ? [] : form.linked_document_ids,

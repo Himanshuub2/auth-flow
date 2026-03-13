@@ -4,9 +4,9 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.constants import DOCUMENT, EVENT
-from app.models.documents.document import DocumentStatus
-from app.models.events.event import EventStatus
+from constants import DOCUMENT, EVENT
+from models.documents.document import DocumentStatus
+from models.events.event import EventStatus
 
 
 def test_list_combined_all(client: TestClient) -> None:
