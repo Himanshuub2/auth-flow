@@ -219,6 +219,7 @@ async def get_item_revision_snapshot(
         revision, media_items = await revision_service.get_revision_snapshot(
             db, item_id, media_version, revision_number
         )
+        event = revision.event
         rev_out = RevisionOut(
             id=revision.id,
             event_id=revision.event_id,
@@ -231,6 +232,9 @@ async def get_item_revision_snapshot(
             description=revision.description,
             tags=revision.tags,
             change_remarks=revision.change_remarks,
+            deactivate_remarks=event.deactivate_remarks,
+            status=event.status.value,
+            updated_at=event.updated_at,
             created_by=revision.created_by,
             created_by_name=revision.creator.full_name,
             created_at=revision.created_at,
@@ -259,6 +263,7 @@ async def get_item_revision_snapshot(
         revision, files = await document_service.get_revision_snapshot(
             db, item_id, media_version, revision_number
         )
+        doc = revision.document
         rev_out = DocumentRevisionOut(
             id=revision.id,
             document_id=revision.document_id,
@@ -271,6 +276,10 @@ async def get_item_revision_snapshot(
             summary=revision.summary,
             applicability_type=revision.applicability_type,
             applicability_refs=revision.applicability_refs,
+            change_remarks=doc.change_remarks,
+            deactivate_remarks=doc.deactivate_remarks,
+            status=doc.status.value,
+            updated_at=doc.updated_at,
             created_by=revision.created_by,
             created_by_name=revision.creator.full_name,
             created_at=revision.created_at,

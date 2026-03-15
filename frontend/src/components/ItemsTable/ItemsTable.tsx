@@ -70,9 +70,10 @@ export default function ItemsTable({ onEditEvent, onEditDocument, refreshKey }: 
     load();
   };
 
-  const handleToggleDocument = async (id: number) => {
+  const handleToggleDocument = async (id: number,status:string) => {
+    const deactivate_remarks = status === "ACTIVE" ? prompt("Enter deactivation remarks:") : null;
     if (!confirm("Toggle document status?")) return;
-    await toggleDocumentStatus(id);
+    await toggleDocumentStatus(id,deactivate_remarks);
     load();
   };
 
@@ -130,7 +131,7 @@ export default function ItemsTable({ onEditEvent, onEditDocument, refreshKey }: 
                     <button onClick={() => handleDeactivateEvent(row.id)}>Deactivate</button>
                   )}
                   {row.item_type === "document" && (row.status === "ACTIVE" || row.status === "INACTIVE") && (
-                    <button onClick={() => handleToggleDocument(row.id)}>Toggle</button>
+                    <button onClick={() => handleToggleDocument(row.id, row.status)}>Toggle</button>
                   )}
                   {row.item_type === "document" && row.status !== "INACTIVE" && (
                     <button onClick={() => handleDeactivateDocument(row.id)}>Deactivate</button>

@@ -50,7 +50,6 @@ class EventOut(BaseModel):
     tags: list | None
     current_media_version: int
     current_revision_number: int
-    version_display: str
     status: EventStatus
     applicability_type: ApplicabilityType
     applicability_refs: dict | None
@@ -79,6 +78,9 @@ class RevisionOut(BaseModel):
     description: str | None
     tags: list | None
     change_remarks: str | None = None
+    deactivate_remarks: str | None = None
+    status: str
+    updated_at: datetime
     created_by: int
     created_by_name: str
     created_at: datetime

@@ -155,7 +155,6 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         tags=event.tags,
         current_media_version=ver,
         current_revision_number=event.current_revision_number,
-        version_display=f"{ver}.{event.current_revision_number}",
         status=event.status,
         applicability_type=event.applicability_type,
         applicability_refs=event.applicability_refs,
@@ -240,21 +239,25 @@ async def list_events(
     return events, total
 
 
-async def delete_event(db: AsyncSession, event_id: int, deactivate_remarks: str, deactivated_by: int) -> None:
-    event = await get_event(db, event_id)
-    event.deactivate_remarks = deactivate_remarks
-    event.deactivated_at = func.now()
-    event.deactivated_by = deactivated_by
-    event.status = EventStatus.INACTIVE
-    await db.flush()
-
-
-async def toggle_event_status(db: AsyncSession, event_id: int) -> Event:
+async def toggle_event_status(
+    db: AsyncSession, event_id: int, deactivated_by: int, deactivate_remarks: str | None = None
+) -> Event:
     event = await get_event(db, event_id)
     if event.status == EventStatus.ACTIVE:
+        if not deactivate_remarks or not deactivate_remarks.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Deactivation remarks are required when deactivating an event",
+            )
         event.status = EventStatus.INACTIVE
+        event.deactivate_remarks = deactivate_remarks.strip()
+        event.deactivated_at = func.now()
+        event.deactivated_by = deactivated_by
     elif event.status == EventStatus.INACTIVE:
         event.status = EventStatus.ACTIVE
+        event.deactivate_remarks = None
+        event.deactivated_at = None
+        event.deactivated_by = None
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

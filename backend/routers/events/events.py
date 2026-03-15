@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cache import cache_delete
@@ -11,8 +11,11 @@ from utils.security import CurrentUser, get_current_user
 from pydantic import BaseModel
 
 
-class DeactivateEventPayload(BaseModel):
-    deactivate_remarks: str
+class ToggleEventPayload(BaseModel):
+    """Required when deactivating (ACTIVE -> INACTIVE). Optional when reactivating."""
+
+    deactivate_remarks: str | None = None
+
 
 router = APIRouter()
 
@@ -109,31 +112,14 @@ async def get_event(
     return APIResponse(message="Event fetched", status_code=200, status="success", data=_to_out(event))
 
 
-@router.post("/{event_id}/draft", response_model=APIResponse, status_code=201)
-async def create_draft_from_event(
-    event_id: int,
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    draft = await event_service.create_draft_from_event(db, event_id, user.id)
-    return APIResponse(message="Draft created", status_code=201, status="success", data=_to_out(draft))
-
-
 @router.patch("/{event_id}/toggle-status", response_model=APIResponse)
 async def toggle_event_status(
     event_id: int,
+    payload: ToggleEventPayload | None = Body(None),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    event = await event_service.toggle_event_status(db, event_id)
+    remarks = payload.deactivate_remarks if payload else None
+    event = await event_service.toggle_event_status(db, event_id, user.id, deactivate_remarks=remarks)
+    await cache_delete(f"item:event:{event_id}")
     return APIResponse(message="Status updated", status_code=200, status="success", data=_to_out(event))
-
-
-@router.delete("/{event_id}", status_code=204)
-async def delete_event(
-    event_id: int,
-    payload: DeactivateEventPayload,
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    await event_service.delete_event(db, event_id, payload.deactivate_remarks, user.id)

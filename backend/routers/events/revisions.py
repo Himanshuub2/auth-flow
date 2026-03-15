@@ -16,6 +16,10 @@ def _rev_to_out(rev) -> RevisionOut:
     d = {c.key: getattr(rev, c.key) for c in rev.__table__.columns}
     d["version_display"] = f"{rev.media_version}.{rev.revision_number}"
     d["created_by_name"] = rev.creator.full_name
+    event = rev.event
+    d["status"] = event.status.value
+    d["updated_at"] = event.updated_at
+    d["deactivate_remarks"] = event.deactivate_remarks
     return RevisionOut(**d)
 
 

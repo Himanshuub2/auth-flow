@@ -224,16 +224,13 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         summary=doc.summary,
         legislation_id=doc.legislation_id,
         sub_legislation_id=doc.sub_legislation_id,
-        version=doc.version,
         next_review_date=doc.next_review_date,
         download_allowed=doc.download_allowed,
-        linked_document_ids=doc.linked_document_ids,
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
         status=doc.status,
         current_media_version=ver,
         current_revision_number=doc.current_revision_number,
-        version_display=f"{ver}.{doc.current_revision_number}",
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
         deactivated_at=doc.deactivated_at,
@@ -276,16 +273,12 @@ async def list_documents(
     return docs, total
 
 
-async def deactivate_document(db: AsyncSession, document_id: int, deactivate_remarks: str, deactivated_by: int) -> None:
-    doc = await get_document(db, document_id)
-    doc.status = DocumentStatus.INACTIVE
-    doc.deactivate_remarks = deactivate_remarks
-    doc.deactivated_at = func.now()
-    doc.deactivated_by = deactivated_by
-    await db.flush()
-
-
-async def toggle_document_status(db: AsyncSession, document_id: int, user: CurrentUser | None = None) -> Document:
+async def toggle_document_status(
+    db: AsyncSession,
+    document_id: int,
+    user: CurrentUser | None = None,
+    deactivate_remarks: str | None = None,
+) -> Document:
     doc = await get_document(db, document_id)
     _check_type_permission(user, doc.document_type)
 
@@ -300,9 +293,20 @@ async def toggle_document_status(db: AsyncSession, document_id: int, user: Curre
         if existing:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Active FAQ already exists")
     if doc.status == DocumentStatus.ACTIVE:
+        if not deactivate_remarks or not deactivate_remarks.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Deactivation remarks are required when deactivating a document",
+            )
         doc.status = DocumentStatus.INACTIVE
+        doc.deactivate_remarks = deactivate_remarks.strip()
+        doc.deactivated_at = func.now()
+        doc.deactivated_by = user.id if user else None
     elif doc.status == DocumentStatus.INACTIVE:
         doc.status = DocumentStatus.ACTIVE
+        doc.deactivate_remarks = None
+        doc.deactivated_at = None
+        doc.deactivated_by = None
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -526,7 +530,10 @@ async def get_revision(
             DocumentRevision.media_version == media_version,
             DocumentRevision.revision_number == revision_number,
         )
-        .options(selectinload(DocumentRevision.creator))
+        .options(
+            selectinload(DocumentRevision.creator),
+            selectinload(DocumentRevision.document),
+        )
     )
     rev = result.scalar_one_or_none()
     if not rev:

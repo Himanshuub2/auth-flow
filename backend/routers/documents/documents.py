@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cache import cache_delete, cache_get, cache_set
@@ -6,7 +6,6 @@ from config import settings
 from database import get_db
 from models.documents.document import Document, DocumentStatus, DocumentType, LABEL_TO_DOCUMENT_TYPE, document_type_to_label
 from schemas.documents.document import (
-    DeactivatePayload,
     DocumentHubOut,
     DocumentOut,
     DocumentRevisionOut,
@@ -16,10 +15,18 @@ from schemas.documents.document import (
 )
 from schemas.documents.reference import LinkedOptionOut
 from schemas.events.comman import APIResponse, APIResponsePaginated
+from pydantic import BaseModel
+
 from services.documents import document_service
 from utils.security import CurrentUser, get_current_user
 
 router = APIRouter()
+
+
+class ToggleDocumentPayload(BaseModel):
+    """Required when deactivating (ACTIVE -> INACTIVE). Optional when reactivating."""
+
+    deactivate_remarks: str | None = None
 
 
 def _to_out(
@@ -196,35 +203,17 @@ async def get_document(
     return APIResponse(message="Document fetched", status_code=200, status="success", data=_to_out(doc, linked_details))
 
 
-@router.post("/{document_id}/draft", response_model=APIResponse, status_code=201)
-async def create_draft(
-    document_id: int,
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    draft = await document_service.create_draft_from_document(db, document_id, user.id)
-    return APIResponse(message="Draft created", status_code=201, status="success", data=_to_out(draft))
-
-
 @router.patch("/{document_id}/toggle-status", response_model=APIResponse)
 async def toggle_status(
     document_id: int,
+    payload: ToggleDocumentPayload | None = Body(None),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    doc = await document_service.toggle_document_status(db, document_id, user)
+    remarks = payload.deactivate_remarks if payload else None
+    doc = await document_service.toggle_document_status(db, document_id, user, deactivate_remarks=remarks)
+    await cache_delete(f"item:document:{document_id}")
     return APIResponse(message="Status updated", status_code=200, status="success", data=_to_out(doc))
-
-
-@router.delete("/{document_id}", response_model=APIResponse)
-async def deactivate_document(
-    document_id: int,
-    payload: DeactivatePayload,
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
-):
-    await document_service.deactivate_document(db, document_id, payload.deactivate_remarks, user.id)
-    return APIResponse(message="Document deactivated", status_code=200, status="success", data=None)
 
 
 @router.get("/{document_id}/revisions/", response_model=APIResponse)

@@ -117,8 +117,8 @@ export const createDraftFromDocument = (id: number) =>
 export const deactivateDocument = (id: number, deactivate_remarks: string) =>
   client.delete(`/documents/${id}`, { data: { deactivate_remarks } });
 
-export const toggleDocumentStatus = (id: number) =>
-  client.patch<DocumentData>(`/documents/${id}/toggle-status`);
+export const toggleDocumentStatus = (id: number, deactivate_remarks: string) =>
+  client.patch<DocumentData>(`/documents/${id}/toggle-status`, { deactivate_remarks: deactivate_remarks });
 
 export const getLinkedOptions = (documentType: string, excludeId?: number) =>
   client.get<LinkedOption[]>("/documents/linked-options", {

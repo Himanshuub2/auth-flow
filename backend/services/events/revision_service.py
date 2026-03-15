@@ -45,7 +45,10 @@ async def get_revision_snapshot(
             EventRevision.media_version == media_version,
             EventRevision.revision_number == revision_number,
         )
-        .options(selectinload(EventRevision.creator))
+        .options(
+            selectinload(EventRevision.creator),
+            selectinload(EventRevision.event),
+        )
     )
     revision = result.scalar_one_or_none()
     if not revision:

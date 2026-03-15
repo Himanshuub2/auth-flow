@@ -95,16 +95,13 @@ class DocumentOut(BaseModel):
     summary: str | None
     legislation_id: int | None
     sub_legislation_id: int | None
-    version: int
     next_review_date: date | None
     download_allowed: bool
-    linked_document_ids: list | None
     applicability_type: ApplicabilityType
     applicability_refs: dict | None
     status: DocumentStatus
     current_media_version: int
     current_revision_number: int
-    version_display: str
     change_remarks: str | None
     deactivate_remarks: str | None
     deactivated_at: datetime | None
@@ -131,6 +128,10 @@ class DocumentRevisionOut(BaseModel):
     summary: str | None
     applicability_type: ApplicabilityType
     applicability_refs: dict | None
+    change_remarks: str | None = None
+    deactivate_remarks: str | None = None
+    status: str
+    updated_at: datetime
     created_by: int
     created_by_name: str
     created_at: datetime
