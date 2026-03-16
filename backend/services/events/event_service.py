@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def save_event(
     db: AsyncSession,
-    user_id: int,
+    user_id: str,
     payload: EventSavePayload,
     *,
     event_id: int | None = None,
@@ -115,10 +115,10 @@ def _compute_media_versions(file_id: int, event: Event) -> list[int]:
 
 
 async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> EventOut:
-    """Item detail: full Event + User.full_name only; media filtered by current version."""
+    """Item detail: full Event + User.username only; media filtered by current version."""
     row = await db.execute(
-        select(Event, User.full_name.label("created_by_name"))
-        .join(User, Event.created_by == User.id)
+        select(Event, User.username.label("created_by_name"))
+        .join(User, Event.created_by == User.staff_id)
         .where(Event.id == event_id)
     )
     one = row.one_or_none()
@@ -205,7 +205,7 @@ def build_event_out(event: Event) -> EventOut:
         applicability_refs=event.applicability_refs,
         replaces_document_id=event.replaces_document_id,
         created_by=event.created_by,
-        created_by_name=event.creator.full_name,
+        created_by_name=event.creator.username,
         created_at=event.created_at,
         updated_at=event.updated_at,
         change_remarks=event.change_remarks,
@@ -240,7 +240,7 @@ async def list_events(
 
 
 async def toggle_event_status(
-    db: AsyncSession, event_id: int, deactivated_by: int, deactivate_remarks: str | None = None
+    db: AsyncSession, event_id: int, deactivated_by: str, deactivate_remarks: str | None = None
 ) -> Event:
     event = await get_event(db, event_id)
     if event.status == EventStatus.ACTIVE:
@@ -268,7 +268,7 @@ async def toggle_event_status(
     return event
 
 
-async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_id: int) -> Event:
+async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_id: str) -> Event:
     parent = await get_event(db, parent_event_id)
     if parent.status != EventStatus.ACTIVE:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Can only create drafts from active events")
@@ -277,7 +277,7 @@ async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_i
     return draft
 
 
-async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: int) -> Event:
+async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: str) -> Event:
     existing = (await db.execute(
         select(Event).where(
             Event.replaces_document_id == parent.id,
@@ -345,7 +345,10 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
             event.current_media_version += 1
             event.current_revision_number = 0
         else:
-            event.current_revision_number += 1
+            # Only caption/description changed on files: no new revision
+            event.staging_file_ids = []
+            event.status = EventStatus.ACTIVE
+            return
 
     published_file_ids = list(event.staging_file_ids or [])
 
@@ -371,13 +374,16 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
     parent = await get_event(db, draft.replaces_document_id)
 
     last_rev = _find_latest_revision(parent)
-    name_changed = (
+    details_changed = (
         draft.event_name != last_rev.event_name
         or draft.sub_event_name != last_rev.sub_event_name
+        or draft.event_dates != last_rev.event_dates
+        or draft.description != last_rev.description
+        or draft.tags != last_rev.tags
     ) if last_rev else True
     files_changed = await _files_differ_between(db, draft, 0, parent, parent.current_media_version)
 
-    if name_changed or files_changed:
+    if details_changed or files_changed:
         draft.current_media_version = parent.current_media_version + 1
         draft.current_revision_number = 0
     else:
@@ -426,13 +432,19 @@ def _find_latest_revision(event: Event) -> EventRevision | None:
 
 
 async def _version_should_bump(db: AsyncSession, event: Event) -> bool:
+    """True if event details or file set changed. Caption/description-only changes do not bump."""
     last_rev = _find_latest_revision(event)
     if not last_rev:
         return True
-    if (event.event_name != last_rev.event_name
-            or event.sub_event_name != last_rev.sub_event_name):
+    if event.event_name != last_rev.event_name or event.sub_event_name != last_rev.sub_event_name:
         return True
-    return await _files_differ_between(db, event, 0, event, event.current_media_version)
+    if event.event_dates != last_rev.event_dates or event.description != last_rev.description:
+        return True
+    if event.tags != last_rev.tags:
+        return True
+    if await _files_differ_between(db, event, 0, event, event.current_media_version):
+        return True
+    return False
 
 
 async def _get_all_files(db: AsyncSession, event_id: int) -> list[EventMediaItem]:

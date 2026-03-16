@@ -13,6 +13,11 @@ class Base(DeclarativeBase):
     pass
 
 
+class BaseUsers(Base):
+    __abstract__ = True
+    __table_args__ = {"schema": "users"}
+
+
 class BaseEvents(Base):
     __abstract__ = True
     __table_args__ = {"schema": "events"}

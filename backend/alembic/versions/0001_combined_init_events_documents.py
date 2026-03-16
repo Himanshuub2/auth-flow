@@ -1,7 +1,7 @@
-"""Combined database setup: events + documents schemas, all tables, current state.
+"""Combined database setup: events + documents + users schemas, all tables, current state.
 
-Single migration for fresh installs. Includes: schemas, tables (replaces_document_id),
-enums (event_status/document_status: DRAFT, ACTIVE, INACTIVE — no PUBLISHED), and seed data.
+Single migration for fresh installs. Includes: schemas, tables,
+enums (event_status/document_status: DRAFT, ACTIVE, INACTIVE), and seed data.
 
 Revision ID: 0001_combined
 Revises: None
@@ -19,17 +19,41 @@ down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+USERS = "users"
 EVENTS = "events"
 DOCUMENTS = "documents"
-USER_SCHEMA = EVENTS  # users live in events schema
 
 
 def upgrade() -> None:
     # ─── Schemas ─────────────────────────────────────────────────────────
+    op.execute(sa.text(f"CREATE SCHEMA IF NOT EXISTS {USERS}"))
     op.execute(sa.text(f"CREATE SCHEMA IF NOT EXISTS {EVENTS}"))
     op.execute(sa.text(f"CREATE SCHEMA IF NOT EXISTS {DOCUMENTS}"))
 
-    # ─── Events schema: enums (DRAFT/ACTIVE/INACTIVE — no PUBLISHED) ───
+    # ─── Users schema: users ────────────────────────────────────────────
+    op.create_table(
+        "users",
+        sa.Column("staff_id", sa.String(255), nullable=False),
+        sa.Column("email", sa.String(255), nullable=False),
+        sa.Column("username", sa.String(255), nullable=False),
+        sa.Column("organization_type", sa.String(255), nullable=True),
+        sa.Column("division_cluster", sa.String(100), nullable=True),
+        sa.Column("department", sa.String(100), nullable=True),
+        sa.Column("designation", sa.String(100), nullable=True),
+        sa.Column("status", sa.String(50), nullable=False, server_default="active"),
+        sa.Column("is_master_admin", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("is_policy_hub_admin", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("is_knowledge_hub_admin", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_by", sa.String(255), nullable=True),
+        sa.PrimaryKeyConstraint("staff_id"),
+        schema=USERS,
+    )
+    op.create_index("ix_users_users_email", "users", ["email"], unique=True, schema=USERS)
+    op.create_index("ix_users_users_staff_id", "users", ["staff_id"], unique=False, schema=USERS)
+
+    # ─── Events schema: enums ──────────────────────────────────────────
     for name, values in [
         ("event_status", "'DRAFT', 'ACTIVE', 'INACTIVE'"),
         ("applicability_type", "'ALL', 'DIVISION', 'EMPLOYEE'"),
@@ -42,27 +66,7 @@ def upgrade() -> None:
             )
         )
 
-    # ─── Events schema: users ─────────────────────────────────────────────
-    op.create_table(
-        "users",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("email", sa.String(length=255), nullable=False),
-        sa.Column("password_hash", sa.String(length=255), nullable=False),
-        sa.Column("full_name", sa.String(length=255), nullable=False),
-        sa.Column("division_cluster", sa.String(length=100), nullable=True),
-        sa.Column("designation", sa.String(length=100), nullable=True),
-        sa.Column("policy_hub_admin", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("is_admin", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("knowledge_hub_admin", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-        schema=EVENTS,
-    )
-    op.create_index(
-        op.f("ix_events_users_email"), "users", ["email"], unique=True, schema=EVENTS
-    )
-
-    # ─── Events schema: events ────────────────────────────────────────────
+    # ─── Events schema: events ──────────────────────────────────────────
     op.create_table(
         "events",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -92,21 +96,21 @@ def upgrade() -> None:
         ),
         sa.Column("applicability_refs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("replaces_document_id", sa.Integer(), nullable=True),
-        sa.Column("created_by", sa.Integer(), nullable=False),
+        sa.Column("created_by", sa.String(255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("change_remarks", sa.Text(), nullable=True),
         sa.Column("deactivate_remarks", sa.Text(), nullable=True),
         sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("deactivated_by", sa.Integer(), nullable=True),
-        sa.ForeignKeyConstraint(["created_by"], [f"{EVENTS}.users.id"]),
+        sa.Column("deactivated_by", sa.String(255), nullable=True),
+        sa.ForeignKeyConstraint(["created_by"], [f"{USERS}.users.staff_id"]),
         sa.ForeignKeyConstraint(["replaces_document_id"], [f"{EVENTS}.events.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["deactivated_by"], [f"{EVENTS}.users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["deactivated_by"], [f"{USERS}.users.staff_id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
         schema=EVENTS,
     )
 
-    # ─── Events schema: event_revisions ────────────────────────────────────
+    # ─── Events schema: event_revisions ─────────────────────────────────
     op.create_table(
         "event_revisions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -119,17 +123,17 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("tags", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
-        sa.Column("created_by", sa.Integer(), nullable=False),
+        sa.Column("created_by", sa.String(255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("change_remarks", sa.Text(), nullable=True),
-        sa.ForeignKeyConstraint(["created_by"], [f"{EVENTS}.users.id"]),
+        sa.ForeignKeyConstraint(["created_by"], [f"{USERS}.users.staff_id"]),
         sa.ForeignKeyConstraint(["event_id"], [f"{EVENTS}.events.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("event_id", "media_version", "revision_number", name="uq_event_version_revision"),
         schema=EVENTS,
     )
 
-    # ─── Events schema: files (event media) ────────────────────────────────
+    # ─── Events schema: files (event media) ─────────────────────────────
     op.create_table(
         "files",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -152,7 +156,7 @@ def upgrade() -> None:
         schema=EVENTS,
     )
 
-    # ─── Documents schema: enums ──────────────────────────────────────────
+    # ─── Documents schema: enums ────────────────────────────────────────
     op.execute(sa.text(
         f"DO $$ BEGIN CREATE TYPE {DOCUMENTS}.document_type AS ENUM ("
         "'POLICY','GUIDANCE_NOTE','LAW_REGULATION','TRAINING_MATERIAL',"
@@ -175,7 +179,7 @@ def upgrade() -> None:
         "); EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
     ))
 
-    # ─── Documents schema: legislation ──────────────────────────────────────
+    # ─── Documents schema: legislation ──────────────────────────────────
     op.create_table(
         "legislation",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -193,7 +197,7 @@ def upgrade() -> None:
         schema=DOCUMENTS,
     )
 
-    # ─── Documents schema: documents ──────────────────────────────────────
+    # ─── Documents schema: documents ────────────────────────────────────
     op.create_table(
         "documents",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -240,21 +244,21 @@ def upgrade() -> None:
         sa.Column("change_remarks", sa.Text(), nullable=True),
         sa.Column("deactivate_remarks", sa.Text(), nullable=True),
         sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("deactivated_by", sa.Integer(), nullable=True),
+        sa.Column("deactivated_by", sa.String(255), nullable=True),
         sa.Column("replaces_document_id", sa.Integer(), nullable=True),
-        sa.Column("created_by", sa.Integer(), nullable=False),
+        sa.Column("created_by", sa.String(255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["legislation_id"], [f"{DOCUMENTS}.legislation.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["sub_legislation_id"], [f"{DOCUMENTS}.sub_legislation.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["replaces_document_id"], [f"{DOCUMENTS}.documents.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["created_by"], [f"{USER_SCHEMA}.users.id"]),
-        sa.ForeignKeyConstraint(["deactivated_by"], [f"{USER_SCHEMA}.users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["created_by"], [f"{USERS}.users.staff_id"]),
+        sa.ForeignKeyConstraint(["deactivated_by"], [f"{USERS}.users.staff_id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
         schema=DOCUMENTS,
     )
 
-    # ─── Documents schema: document_revisions ─────────────────────────────
+    # ─── Documents schema: document_revisions ───────────────────────────
     op.create_table(
         "document_revisions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -284,16 +288,16 @@ def upgrade() -> None:
         ),
         sa.Column("applicability_refs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
-        sa.Column("created_by", sa.Integer(), nullable=False),
+        sa.Column("created_by", sa.String(255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["document_id"], [f"{DOCUMENTS}.documents.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["created_by"], [f"{USER_SCHEMA}.users.id"]),
+        sa.ForeignKeyConstraint(["created_by"], [f"{USERS}.users.staff_id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("document_id", "media_version", "revision_number", name="uq_doc_version_revision"),
         schema=DOCUMENTS,
     )
 
-    # ─── Documents schema: files ─────────────────────────────────────────
+    # ─── Documents schema: files ────────────────────────────────────────
     op.create_table(
         "files",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -313,7 +317,7 @@ def upgrade() -> None:
         schema=DOCUMENTS,
     )
 
-    # ─── Seed legislation ─────────────────────────────────────────────────
+    # ─── Seed legislation ───────────────────────────────────────────────
     op.execute(sa.text(f"""
         INSERT INTO {DOCUMENTS}.legislation (name) VALUES
         ('The Companies Act, 2013'),
@@ -374,10 +378,15 @@ def downgrade() -> None:
     op.drop_table("files", schema=EVENTS)
     op.drop_table("event_revisions", schema=EVENTS)
     op.drop_table("events", schema=EVENTS)
-    op.drop_index(op.f("ix_events_users_email"), table_name="users", schema=EVENTS)
-    op.drop_table("users", schema=EVENTS)
     for name in ("file_type", "applicability_type", "event_status"):
         op.execute(sa.text(f"DROP TYPE IF EXISTS {EVENTS}.{name}"))
 
+    op.drop_index("ix_users_users_status", table_name="users", schema=USERS)
+    op.drop_index("ix_users_users_staff_id", table_name="users", schema=USERS)
+    op.drop_index("ix_users_users_username", table_name="users", schema=USERS)
+    op.drop_index("ix_users_users_email", table_name="users", schema=USERS)
+    op.drop_table("users", schema=USERS)
+
     op.execute(sa.text(f"DROP SCHEMA IF EXISTS {DOCUMENTS}"))
     op.execute(sa.text(f"DROP SCHEMA IF EXISTS {EVENTS}"))
+    op.execute(sa.text(f"DROP SCHEMA IF EXISTS {USERS}"))

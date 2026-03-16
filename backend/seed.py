@@ -12,20 +12,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TEST_USER = {
+    "staff_id": "STAFF001",
     "email": "admin@eventflow.com",
-    "full_name": "Admin User",
+    "username": "admin",
+    "organization_type": "Corporate",
     "division_cluster": "Corporate",
+    "department": "IT",
     "designation": "Administrator",
-    "policy_hub_admin": True,
-    "knowledge_hub_admin": True,
-    "is_admin": True,
+    "status": "active",
+    "is_master_admin": True,
+    "is_policy_hub_admin": True,
+    "is_knowledge_hub_admin": True,
 }
 
 
 async def seed() -> None:
     async with async_session_factory() as session:
         existing_user = (
-            await session.execute(select(User).where(User.email == TEST_USER["email"]))
+            await session.execute(select(User).where(User.staff_id == TEST_USER["staff_id"]))
         ).scalar_one_or_none()
         if not existing_user:
             user = User(**TEST_USER)

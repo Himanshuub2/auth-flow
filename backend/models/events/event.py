@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import BaseEvents
 
 SCHEMA = "events"
+USERS_SCHEMA = "users"
 
 
 class EventStatus(str, enum.Enum):
@@ -53,7 +54,7 @@ class Event(BaseEvents):
         Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="SET NULL"), nullable=True
     )
 
-    created_by: Mapped[int] = mapped_column(Integer, ForeignKey(f"{SCHEMA}.users.id"), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -61,8 +62,8 @@ class Event(BaseEvents):
     change_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
     deactivate_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deactivated_by: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey(f"{SCHEMA}.users.id", ondelete="SET NULL"), nullable=True
+    deactivated_by: Mapped[str | None] = mapped_column(
+        String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id", ondelete="SET NULL"), nullable=True
     )
 
     revisions: Mapped[list["EventRevision"]] = relationship(
@@ -98,7 +99,7 @@ class EventRevision(BaseEvents):
 
     file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
-    created_by: Mapped[int] = mapped_column(Integer, ForeignKey(f"{SCHEMA}.users.id"), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

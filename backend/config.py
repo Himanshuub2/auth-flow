@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     # Azure Blob Storage
     AZURE_STORAGE_CONNECTION_STRING: str = ""
     AZURE_CONTAINER_NAME: str = "uploads"
+    # When True, skip upload to Azure and return placeholder image URLs for testing
+    BYPASS_AZURE_UPLOAD: bool = True
 
     class Config:
         env_file = ".env"

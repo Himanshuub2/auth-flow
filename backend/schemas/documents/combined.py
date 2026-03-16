@@ -13,11 +13,11 @@ class CombinedItemOut(BaseModel):
     document_type: str | None = None
     version_display: str
     status: str
-    created_by: int
+    created_by: str
     created_by_name: str
     created_at: datetime
     updated_at: datetime
-    deactivated_by: int | None = None
+    deactivated_by: str | None = None
     deactivated_by_name: str | None = None
     deactivated_at: datetime | None = None
     next_review_date: date | None = None

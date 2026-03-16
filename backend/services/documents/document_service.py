@@ -40,11 +40,11 @@ logger = logging.getLogger(__name__)
 
 def get_allowed_types_for_user(user: CurrentUser) -> list[DocumentType]:
     allowed: list[DocumentType] = []
-    if user.policy_hub_admin:
+    if user.is_policy_hub_admin:
         allowed.extend(ROLE_DOCUMENT_TYPES["policy_hub_admin"])
-    if user.knowledge_hub_admin:
+    if user.is_knowledge_hub_admin:
         allowed.extend(ROLE_DOCUMENT_TYPES["knowledge_hub_admin"])
-    if user.is_admin:
+    if user.is_master_admin:
         allowed = list(DocumentType)
     return allowed
 
@@ -182,10 +182,10 @@ async def get_document_for_detail(db: AsyncSession, document_id: int) -> Documen
 
 
 async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -> DocumentOut:
-    """Item detail: full Document + User.full_name only; files filtered by current version."""
+    """Item detail: full Document + User.username only; files filtered by current version."""
     row = await db.execute(
-        select(Document, User.full_name.label("created_by_name"))
-        .join(User, Document.created_by == User.id)
+        select(Document, User.username.label("created_by_name"))
+        .join(User, Document.created_by == User.staff_id)
         .where(Document.id == document_id)
     )
     one = row.one_or_none()
@@ -317,7 +317,7 @@ async def toggle_document_status(
     return doc
 
 
-async def create_draft_from_document(db: AsyncSession, parent_id: int, user_id: int) -> Document:
+async def create_draft_from_document(db: AsyncSession, parent_id: int, user_id: str) -> Document:
     parent = await get_document(db, parent_id)
     if parent.status != DocumentStatus.ACTIVE:
         raise HTTPException(
@@ -390,11 +390,12 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
         )
 
     if applicability.upper() == "EMPLOYEE":
+        # For EMPLOYEE applicability, we now store and match on user email, not numeric IDs.
         return query.where(
             or_(
                 Document.applicability_type == ApplicabilityType.ALL,
                 (Document.applicability_type == ApplicabilityType.EMPLOYEE)
-                & func.cast(Document.applicability_refs, SAString).contains(str(user.id)),
+                & func.cast(Document.applicability_refs, SAString).contains(user.email),
             )
         )
 
@@ -596,7 +597,7 @@ def build_document_out(
         deactivated_at=doc.deactivated_at,
         replaces_document_id=doc.replaces_document_id,
         created_by=doc.created_by,
-        created_by_name=doc.creator.full_name,
+        created_by_name=doc.creator.username,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         files=files,
@@ -666,7 +667,7 @@ async def _validate_linked_ids(
             )
 
 
-async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: int) -> Document:
+async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str) -> Document:
     existing = (await db.execute(
         select(Document).where(
             Document.replaces_document_id == parent.id,

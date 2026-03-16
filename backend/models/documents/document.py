@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from models.events.user import User
 
 SCHEMA = "documents"
-EVENTS_SCHEMA = "events"
+USERS_SCHEMA = "users"
 
 class DocumentType(str, enum.Enum):
     POLICY = "POLICY"
@@ -150,16 +150,16 @@ class Document(BaseDocuments):
     change_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
     deactivate_remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deactivated_by: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey(f"{EVENTS_SCHEMA}.users.id", ondelete="SET NULL"), nullable=True
+    deactivated_by: Mapped[str | None] = mapped_column(
+        String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id", ondelete="SET NULL"), nullable=True
     )
 
     replaces_document_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(f"{SCHEMA}.documents.id", ondelete="SET NULL"), nullable=True,
     )
 
-    created_by: Mapped[int] = mapped_column(
-        Integer, ForeignKey(f"{EVENTS_SCHEMA}.users.id"), nullable=False,
+    created_by: Mapped[str] = mapped_column(
+        String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id"), nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -176,7 +176,7 @@ class Document(BaseDocuments):
     creator: Mapped["User"] = relationship(
         "User",
         foreign_keys=[created_by],
-        primaryjoin="Document.created_by == User.id",
+        primaryjoin="Document.created_by == User.staff_id",
         lazy="joined",
     )
 
@@ -210,8 +210,8 @@ class DocumentRevision(BaseDocuments):
 
     file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
-    created_by: Mapped[int] = mapped_column(
-        Integer, ForeignKey(f"{EVENTS_SCHEMA}.users.id"), nullable=False,
+    created_by: Mapped[str] = mapped_column(
+        String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id"), nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -219,6 +219,6 @@ class DocumentRevision(BaseDocuments):
     creator: Mapped["User"] = relationship(
         "User",
         foreign_keys=[created_by],
-        primaryjoin="DocumentRevision.created_by == User.id",
+        primaryjoin="DocumentRevision.created_by == User.staff_id",
         lazy="joined",
     )

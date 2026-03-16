@@ -100,12 +100,12 @@ async def list_combined(
     rows = (await db.execute(rows_q)).all()
 
     creator_ids = {r.created_by for r in rows} | {r.deactivated_by for r in rows if r.deactivated_by is not None}
-    name_map: dict[int, str] = {}
+    name_map: dict[str, str] = {}
     if creator_ids:
         user_rows = (await db.execute(
-            select(User.id, User.full_name).where(User.id.in_(creator_ids))
+            select(User.staff_id, User.username).where(User.staff_id.in_(creator_ids))
         )).all()
-        name_map = {u.id: u.full_name for u in user_rows}
+        name_map = {u.staff_id: u.username for u in user_rows}
 
     data = [
         CombinedItemOut(
@@ -236,7 +236,7 @@ async def get_item_revision_snapshot(
             status=event.status.value,
             updated_at=event.updated_at,
             created_by=revision.created_by,
-            created_by_name=revision.creator.full_name,
+            created_by_name=revision.creator.username,
             created_at=revision.created_at,
         )
         return RevisionDetailOut(
@@ -281,7 +281,7 @@ async def get_item_revision_snapshot(
             status=doc.status.value,
             updated_at=doc.updated_at,
             created_by=revision.created_by,
-            created_by_name=revision.creator.full_name,
+            created_by_name=revision.creator.username,
             created_at=revision.created_at,
         )
         return DocumentRevisionDetailOut(

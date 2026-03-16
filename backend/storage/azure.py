@@ -1,8 +1,10 @@
 """Azure Blob Storage backend with streaming upload and short-lived SAS URLs."""
 
+import hashlib
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import UploadFile
 
@@ -26,8 +28,47 @@ def _parse_connection_string(conn_str: str) -> dict[str, str]:
     return parts
 
 
+def _blob_path_from_url(url: str, container_name: str) -> str | None:
+    """
+    Extract blob path from an Azure blob URL (with or without SAS query string).
+    Returns the path after the container segment, or None if not parseable.
+    """
+    if "://" not in url or not container_name:
+        return None
+    try:
+        # Strip query string (SAS) if present
+        base = url.split("?", 1)[0]
+        # .../container_name/path/to/blob
+        prefix = f"/{container_name}/"
+        if prefix not in base:
+            return None
+        idx = base.index(prefix) + len(prefix)
+        raw = base[idx:].strip("/")
+        return unquote(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _fake_image_url(path: str) -> str:
+    """Return a placeholder image URL for testing (bypass mode)."""
+    seed = hashlib.md5(path.encode()).hexdigest()[:8]
+    w, h = 400, 300
+    return f"https://picsum.photos/seed/{seed}/{w}/{h}"
+
+
 class AzureBlobStorageBackend(StorageBackend):
     def __init__(self) -> None:
+        self._bypass = getattr(settings, "BYPASS_AZURE_UPLOAD", False)
+        self._container_name = settings.AZURE_CONTAINER_NAME
+        self._client: Any = None
+        self._account_name: str | None = None
+        self._account_key: str | None = None
+        self._sas_permissions_cls: Any = None
+
+        if self._bypass:
+            logger.info("Azure blob upload bypass enabled: returning fake URLs for testing")
+            return
+
         from azure.storage.blob.aio import BlobServiceClient
         from azure.storage.blob import BlobSasPermissions  # type: ignore[attr-defined]
 
@@ -39,12 +80,10 @@ class AzureBlobStorageBackend(StorageBackend):
         self._client = BlobServiceClient.from_connection_string(
             settings.AZURE_STORAGE_CONNECTION_STRING,
         )
-        self._container_name = settings.AZURE_CONTAINER_NAME
-
         conn_parts = _parse_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
-        self._account_name: str | None = conn_parts.get("AccountName")
-        self._account_key: str | None = conn_parts.get("AccountKey")
-        self._sas_permissions_cls: Any = BlobSasPermissions
+        self._account_name = conn_parts.get("AccountName")
+        self._account_key = conn_parts.get("AccountKey")
+        self._sas_permissions_cls = BlobSasPermissions
 
         if not self._account_name or not self._account_key:
             logger.warning(
@@ -56,6 +95,10 @@ class AzureBlobStorageBackend(StorageBackend):
         return self._client.get_container_client(self._container_name)
 
     async def save(self, file: UploadFile, destination: str) -> str:
+        if self._bypass:
+            logger.debug("Bypass: skipping Azure upload for %s", destination)
+            return destination
+
         try:
             container = await self._get_container()
             blob = container.get_blob_client(destination)
@@ -79,6 +122,9 @@ class AzureBlobStorageBackend(StorageBackend):
             raise
 
     async def delete(self, path: str) -> None:
+        if self._bypass:
+            logger.debug("Bypass: skipping Azure delete for %s", path)
+            return
         try:
             container = await self._get_container()
             blob = container.get_blob_client(path)
@@ -87,13 +133,35 @@ class AzureBlobStorageBackend(StorageBackend):
         except Exception:
             logger.warning("Azure blob delete failed: %s/%s", self._container_name, path, exc_info=True)
 
+    def get_read_url(self, path_or_url: str) -> str:
+        """
+        Always return a fresh SAS URL (10 min expiry). If path_or_url is a blob path
+        (no '://'), use it directly. If it is a full blob URL (legacy), extract the
+        blob path and generate a new SAS URL. When bypass is enabled, returns a fake image URL.
+        """
+        if self._bypass:
+            path = path_or_url
+            if "://" in path_or_url:
+                path = _blob_path_from_url(path_or_url, self._container_name) or path_or_url
+            return _fake_image_url(path)
+        if "://" in path_or_url:
+            path = _blob_path_from_url(path_or_url, self._container_name)
+            if path is not None:
+                return self.get_url(path)
+            logger.warning(
+                "Could not extract blob path from URL for container %s; returning URL as-is",
+                self._container_name,
+            )
+            return path_or_url
+        return self.get_url(path_or_url)
+
     def get_url(self, path: str) -> str:
         """
         Return a SAS URL for the given blob path with a 10-minute expiry.
-
-        Falls back to an unsigned URL if SAS generation is not possible, and
-        logs errors appropriately.
+        When bypass is enabled, returns a placeholder image URL for testing.
         """
+        if self._bypass:
+            return _fake_image_url(path)
         account_url = self._client.url
         base_url = f"{account_url}{self._container_name}/{path}"
 
@@ -109,7 +177,10 @@ class AzureBlobStorageBackend(StorageBackend):
         try:
             from azure.storage.blob import generate_blob_sas  # type: ignore[attr-defined]
 
-            expiry = datetime.utcnow() + timedelta(minutes=10)
+            # Explicit start (1h ago) and expiry (10min from now) in naive UTC so Azure always sees start < expiry.
+            now_utc = datetime.now(timezone.utc)
+            start_naive = (now_utc - timedelta(hours=1)).replace(tzinfo=None)
+            expiry_naive = (now_utc + timedelta(minutes=10)).replace(tzinfo=None)
             permissions = self._sas_permissions_cls(read=True)
 
             sas_token = generate_blob_sas(
@@ -118,7 +189,8 @@ class AzureBlobStorageBackend(StorageBackend):
                 blob_name=path,
                 account_key=self._account_key,
                 permission=permissions,
-                expiry=expiry,
+                start=start_naive,
+                expiry=expiry_naive,
             )
 
             signed_url = f"{base_url}?{sas_token}"

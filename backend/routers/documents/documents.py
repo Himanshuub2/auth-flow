@@ -62,7 +62,7 @@ def _to_list_out(doc: Document) -> DocumentOut:
         deactivated_at=doc.deactivated_at,
         replaces_document_id=doc.replaces_document_id,
         created_by=doc.created_by,
-        created_by_name=doc.creator.full_name,
+        created_by_name=doc.creator.username,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         files=[],
@@ -259,7 +259,7 @@ async def get_revision(
         applicability_type=rev.applicability_type,
         applicability_refs=rev.applicability_refs,
         created_by=rev.created_by,
-        created_by_name=rev.creator.full_name,
+        created_by_name=rev.creator.username,
         created_at=rev.created_at,
     )
     return APIResponse(message="Revision fetched", status_code=200, status="success", data=data)

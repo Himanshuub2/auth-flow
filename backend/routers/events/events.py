@@ -43,7 +43,7 @@ def _to_list_out(event: Event) -> EventOut:
         applicability_refs=event.applicability_refs,
         replaces_document_id=event.replaces_document_id,
         created_by=event.created_by,
-        created_by_name=event.creator.full_name,
+        created_by_name=event.creator.username,
         created_at=event.created_at,
         updated_at=event.updated_at,
         change_remarks=event.change_remarks,

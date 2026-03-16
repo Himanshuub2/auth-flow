@@ -106,7 +106,7 @@ class DocumentOut(BaseModel):
     deactivate_remarks: str | None
     deactivated_at: datetime | None
     replaces_document_id: int | None = None
-    created_by: int
+    created_by: str
     created_by_name: str
     created_at: datetime
     updated_at: datetime
@@ -132,7 +132,7 @@ class DocumentRevisionOut(BaseModel):
     deactivate_remarks: str | None = None
     status: str
     updated_at: datetime
-    created_by: int
+    created_by: str
     created_by_name: str
     created_at: datetime
 
