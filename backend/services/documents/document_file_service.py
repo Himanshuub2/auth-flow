@@ -2,7 +2,7 @@ import logging
 import uuid
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -66,6 +66,27 @@ async def upload_document_files(
     storage = get_storage()
     saved: list[DocumentFile] = []
 
+    # Enforce max file counts before uploading or saving anything
+    existing_count = (await db.execute(
+        select(func.count())
+        .select_from(DocumentFile)
+        .where(DocumentFile.document_id == document_id)
+    )).scalar_one() or 0
+
+    if document_type == DocumentType.FAQ:
+        # FAQs are limited to a single file total
+        if existing_count + len(files) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="FAQ documents can only have 1 file",
+            )
+    else:
+        if existing_count + len(files) > MAX_FILES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Maximum {MAX_FILES} files allowed",
+            )
+
     for file in files:
         filename = file.filename or "unknown"
         _validate_extension_for_type(filename, document_type)
@@ -89,7 +110,10 @@ async def upload_document_files(
             continue
 
         ext = filename.rsplit(".", 1)[-1].lower()
-        dest_path = f"documents/{document_id}/{uuid.uuid4().hex}.{ext}"
+        if document_type == DocumentType.FAQ:
+            dest_path = f"documents/faqs/{uuid.uuid4().hex}.{ext}"
+        else:
+            dest_path = f"documents/{uuid.uuid4().hex}.{ext}"
         await storage.save(file, dest_path)
 
         item = DocumentFile(
