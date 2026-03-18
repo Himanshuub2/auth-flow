@@ -11,14 +11,14 @@ from models.events.event import EventStatus
 
 def test_list_combined_all(client: TestClient) -> None:
     """List combined items (events + documents) without filter."""
-    resp = client.get("/api/items/", params={"page": 1, "page_size": 20})
+    resp = client.post("/api/items/", json={"page": 1, "page_size": 20})
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "success"
     assert "data" in body
     assert "total" in body
     for item in body.get("data", []):
-        assert item["item_type"] in (EVENT, DOCUMENT)
+        assert "document_type" in item
         assert "name" in item
         assert "version_display" in item
         assert "status" in item
@@ -26,28 +26,28 @@ def test_list_combined_all(client: TestClient) -> None:
 
 def test_list_combined_filter_event(client: TestClient) -> None:
     """List combined items filtered by item_type=event."""
-    resp = client.get(
+    resp = client.post(
         "/api/items/",
-        params={"page": 1, "page_size": 10, "item_type": EVENT},
+        json={"page": 1, "page_size": 10, "item_type": EVENT},
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "success"
     for item in body.get("data", []):
-        assert item["item_type"] == EVENT
+        assert item["document_type"] == EVENT
 
 
 def test_list_combined_filter_document(client: TestClient) -> None:
     """List combined items filtered by item_type=document."""
-    resp = client.get(
+    resp = client.post(
         "/api/items/",
-        params={"page": 1, "page_size": 10, "item_type": DOCUMENT},
+        json={"page": 1, "page_size": 10, "item_type": DOCUMENT},
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "success"
     for item in body.get("data", []):
-        assert item["item_type"] == DOCUMENT
+        assert item["document_type"] != EVENT  # documents have type label (Policy, EWS, etc.)
 
 
 def test_get_item_detail_event(client: TestClient) -> None:
@@ -201,5 +201,5 @@ def test_item_revisions_invalid_type(client: TestClient) -> None:
 
 def test_list_combined_missing_item_type_ok(client: TestClient) -> None:
     """List without item_type returns both events and documents."""
-    resp = client.get("/api/items/", params={"page": 1, "page_size": 5})
+    resp = client.post("/api/items/", json={"page": 1, "page_size": 5})
     assert resp.status_code == 200

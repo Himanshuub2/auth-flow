@@ -2,15 +2,12 @@ from datetime import date, datetime
 
 from pydantic import BaseModel
 
-from constants import DOCUMENT, EVENT
-
 
 class CombinedItemOut(BaseModel):
-    """Unified row for the combined events + documents table."""
+    """Unified row for the combined events + documents table. document_type is the doc type (Policy, EWS, etc.) or 'event' for events."""
     id: int
-    item_type: str
     name: str
-    document_type: str | None = None
+    document_type: str  # document type label for docs; "event" for events
     version_display: str
     status: str
     created_by: str

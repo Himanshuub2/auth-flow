@@ -8,15 +8,71 @@ Base URL: `/api`. All endpoints expect auth (Bearer token). Auth APIs are out of
 
 Generic API for both **events** and **documents**: list, detail, revisions, revision snapshot. Use `item_type` query to choose `event` or `document`.
 
-### List items
+### KPI (dashboard counts)
 
 | Method | URL | Query |
 |--------|-----|--------|
-| GET | `/api/items/` | `page` (default 1), `page_size` (default 20), `item_type` (optional: `event` \| `document`) |
+| GET | `/api/items/kpi` | — |
 
-**Example:** `GET /api/items/?page=1&page_size=20&item_type=document`
+Based on **next_review_date** (documents only):
 
-**Response (paginated):**
+- **overdue**: next_review_date &lt; today (review date has passed)
+- **due_for_review**: next_review_date ≥ today (not yet overdue)
+
+**Example:** `GET /api/items/kpi`
+
+**Response:**
+```json
+{
+  "message": "KPI fetched",
+  "status": "success",
+  "data": {
+    "active_doc": 30,
+    "due_for_review": 10,
+    "overdue": 5,
+    "draft": 25,
+    "by_type": {
+      "Policy": 15,
+      "Guidance Note": 2,
+      "Law Regulation": 4,
+      "Training Material": 8,
+      "EWS": 3,
+      "Event": 12
+    }
+  }
+}
+```
+
+---
+
+### List items (with filters and search)
+
+| Method | URL | Body |
+|--------|-----|--------|
+| POST | `/api/items/` | JSON (all optional): `page`, `page_size`, `item_type`, `document_types`, `document_names`, `statuses`, `last_updated_start`, `last_updated_end`, `next_review_start`, `next_review_end`, `search` |
+
+All parameters are in the request body. Empty body or omitted fields use defaults (e.g. `page`: 1, `page_size`: 20).
+
+- **document_types**: array; use labels or enum (e.g. `Policy`, `POLICY`, `event`). AND logic: only items whose type is in the list.
+- **document_names**: array; exact match on name.
+- **statuses**: array; `DRAFT`, `ACTIVE`, `INACTIVE`.
+- **last_updated_start** / **last_updated_end**: filter by `updated_at` date range (YYYY-MM-DD).
+- **next_review_start** / **next_review_end**: filter documents by `next_review_date` range (ignored for events).
+- **search**: ILIKE on document/event name.
+
+**Example:** `POST /api/items/` with body:
+```json
+{
+  "page": 1,
+  "page_size": 20,
+  "item_type": "document",
+  "document_types": ["Policy"],
+  "statuses": ["ACTIVE"],
+  "search": "policy"
+}
+```
+
+**Response (paginated):** Each item has `document_type`: for documents it is the type label (e.g. Policy, EWS); for events it is `"event"`. There is no `item_type` field.
 ```json
 {
   "message": "Items fetched",
@@ -24,12 +80,11 @@ Generic API for both **events** and **documents**: list, detail, revisions, revi
   "data": [
     {
       "id": 1,
-      "item_type": "document",
       "name": "Testing doc",
       "document_type": "Policy",
       "version_display": "1.0",
       "status": "ACTIVE",
-      "created_by": 1,
+      "created_by": "STAFF001",
       "created_by_name": "John Doe",
       "created_at": "2025-03-09T10:00:00",
       "updated_at": "2025-03-09T10:00:00",
@@ -220,13 +275,13 @@ Same response shape as **Get item detail** with `item_type=document` (see above)
   "summary": "some summary",
   "legislation_id": null,
   "sub_legislation_id": null,
-  "version": 1,
+  "version": 1,`
   "next_review_date": null,
   "download_allowed": true,
   "linked_document_ids": [],
   "applicability_type": "ALL",
   "applicability_refs": null,
-  "status": "DRAFT",
+  "status": "ACTIVE",
   "selected_filenames": ["doc.pdf"],
   "change_remarks": null
 }

@@ -142,12 +142,20 @@ async def document_hub(
     doc_types: list[str] | None = Query(None, description="Document type(s) — enum or label. Omit for all types."),
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
+    document_type: str | None = Query(
+        None,
+        description="When loading more for one type (e.g. on scroll), pass type label (e.g. 'Policy') and use page for that type.",
+    ),
     applicability: str | None = Query(None, description="ALL | DIVISION | EMPLOYEE"),
     search: str | None = Query(None, description="Search name, summary, tags"),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    cache_key = f"doc_hub:{user.id}:{doc_types}:{page}:{page_size}:{applicability}:{search}"
+    # Load-more: FE sends document_type + page to get next page of items for that type only (append to list).
+    load_more_type = document_type.strip() if document_type else None
+    load_more_page = page if load_more_type else None
+
+    cache_key = f"doc_hub:{user.id}:{doc_types}:{page}:{page_size}:{load_more_type}:{load_more_page}:{applicability}:{search}"
     cached = await cache_get(cache_key)
     if cached is not None:
         return APIResponse(
@@ -165,6 +173,8 @@ async def document_hub(
         page_size=page_size,
         applicability=applicability,
         search=search,
+        load_more_type=load_more_type,
+        load_more_page=load_more_page,
     )
     await cache_set(cache_key, hub.model_dump(), ttl=settings.ITEM_DETAIL_CACHE_TTL_SECONDS)
     return APIResponse(

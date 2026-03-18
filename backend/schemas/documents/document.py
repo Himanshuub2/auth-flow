@@ -157,7 +157,7 @@ class DocumentRevisionDetailOut(BaseModel):
 class DocumentHubItem(BaseModel):
     id: int
     name: str
-    document_type: str
+    isNew: bool = False
 
     model_config = {"from_attributes": True}
 

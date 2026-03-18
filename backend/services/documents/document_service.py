@@ -438,7 +438,7 @@ def _resolve_doc_types(raw: list[str] | None) -> list[DocumentType]:
 
 def _hub_query_for_type(dt: DocumentType, user: CurrentUser, applicability: str | None, search: str | None):
     q = (
-        select(Document.id, Document.name, Document.document_type)
+        select(Document.id, Document.name, Document.created_at)
         .where(
             Document.status == DocumentStatus.ACTIVE,
             Document.replaces_document_id.is_(None),
@@ -459,11 +459,31 @@ async def get_document_hub(
     page_size: int = 10,
     applicability: str | None = None,
     search: str | None = None,
+    load_more_type: str | None = None,
+    load_more_page: int | None = None,
 ) -> DocumentHubOut:
-    type_enums = _resolve_doc_types(doc_types)
-    categories: list[DocumentHubCategory] = []
-
+    """
+    If load_more_type and load_more_page are set, return only that category with
+    items for that page (for FE to append). Otherwise return all types with first
+    page_size items each (initial load).
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=HUB_NEW_DAYS)
+
+    if load_more_type is not None and load_more_page is not None:
+        # Load-more: single category, single page of items
+        doc_type_enum = LABEL_TO_DOCUMENT_TYPE.get(load_more_type.strip())
+        if doc_type_enum is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid document type for load more: {load_more_type}",
+            )
+        type_enums = [doc_type_enum]
+        per_type_page = {doc_type_enum: load_more_page}
+    else:
+        type_enums = _resolve_doc_types(doc_types)
+        per_type_page = {dt: 1 for dt in type_enums}
+
+    categories: list[DocumentHubCategory] = []
 
     for dt in type_enums:
         q = _hub_query_for_type(dt, user, applicability, search)
@@ -484,9 +504,10 @@ async def get_document_hub(
         new_count_q = _apply_search_filter(new_count_q, search)
         new_count = (await db.execute(select(func.count()).select_from(new_count_q.subquery()))).scalar() or 0
 
+        page_for_type = per_type_page[dt]
         rows = (await db.execute(
             q.order_by(Document.updated_at.desc())
-            .offset((page - 1) * page_size)
+            .offset((page_for_type - 1) * page_size)
             .limit(page_size)
         )).all()
 
@@ -494,12 +515,12 @@ async def get_document_hub(
             DocumentHubItem(
                 id=r.id,
                 name=r.name,
-                document_type=document_type_to_label(r.document_type.value),
+                isNew=r.created_at >= cutoff if r.created_at else False,
             )
             for r in rows
         ]
 
-        if items or doc_types:
+        if items or (doc_types is not None and doc_types) or (load_more_type is not None):
             categories.append(DocumentHubCategory(
                 document_type=DOCUMENT_TYPE_LABELS.get(dt, dt.value),
                 total=total,

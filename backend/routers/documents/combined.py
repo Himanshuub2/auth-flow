@@ -1,11 +1,12 @@
-"""Combined events + documents: list, detail, revisions, snapshot."""
+"""Combined events + documents: list, detail, revisions, snapshot, KPI, filter."""
 
 import logging
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 
 from constants import DOCUMENT, EVENT
 from database import get_db
+from schemas.documents.items_filter import ItemsListBody
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from services import items_service
 from utils.security import CurrentUser, get_current_user
@@ -15,24 +16,47 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.get("/", response_model=APIResponsePaginated)
-async def list_combined(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    item_type: str | None = Query(None, description=f"Filter by '{EVENT}' or '{DOCUMENT}'"),
+@router.get("/kpi", response_model=APIResponse)
+async def get_items_kpi(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    data, total = await items_service.list_combined(db, page=page, page_size=page_size, item_type=item_type)
-    logger.info("list_combined total=%s page=%s", total, page)
+    """KPI: active, due for review (next_review_date >= today), overdue (next_review_date < today), draft, and by type."""
+    data = await items_service.get_items_kpi(db)
+    return APIResponse(message="KPI fetched", status_code=200, status="success", data=data)
+
+
+@router.post("/", response_model=APIResponsePaginated)
+async def list_combined(
+    body: ItemsListBody | None = Body(None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Paginated list of events and/or documents. All filters and pagination in payload (optional; empty body = defaults)."""
+    payload = body or ItemsListBody()
+    data, total = await items_service.list_combined_filtered(
+        db,
+        page=payload.page,
+        page_size=payload.page_size,
+        item_type=payload.item_type,
+        document_types=payload.document_types,
+        document_names=payload.document_names,
+        statuses=payload.statuses,
+        last_updated_start=payload.last_updated_start,
+        last_updated_end=payload.last_updated_end,
+        next_review_start=payload.next_review_start,
+        next_review_end=payload.next_review_end,
+        search=payload.search,
+    )
+    logger.info("list_combined total=%s page=%s", total, payload.page)
     return APIResponsePaginated(
         message="Items fetched",
         status_code=200,
         status="success",
         data=data,
         total=total,
-        page=page,
-        page_size=page_size,
+        page=payload.page,
+        page_size=payload.page_size,
     )
 
 
