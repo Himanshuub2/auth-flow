@@ -18,6 +18,7 @@ from schemas.events.comman import APIResponse, APIResponsePaginated
 from pydantic import BaseModel
 
 from services.documents import document_service
+from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user
 
 router = APIRouter()
@@ -48,7 +49,7 @@ def _to_list_out(doc: Document) -> DocumentOut:
         legislation_id=doc.legislation_id,
         sub_legislation_id=doc.sub_legislation_id,
         version=doc.version,
-        next_review_date=doc.next_review_date,
+        next_review_date=format_date_dmy_month_abbr(doc.next_review_date) if doc.next_review_date else None,
         download_allowed=doc.download_allowed,
         linked_document_ids=doc.linked_document_ids,
         applicability_type=doc.applicability_type,
@@ -59,7 +60,7 @@ def _to_list_out(doc: Document) -> DocumentOut:
         version_display=f"{ver}.{doc.current_revision_number}",
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
-        deactivated_at=doc.deactivated_at,
+        deactivated_at=format_date_dmy_month_abbr(doc.deactivated_at) if doc.deactivated_at else None,
         replaces_document_id=doc.replaces_document_id,
         created_by=doc.created_by,
         created_by_name=doc.creator.username,

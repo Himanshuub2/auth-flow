@@ -24,3 +24,22 @@ class SubLegislationOut(BaseModel):
 class LinkedOptionOut(BaseModel):
     id: int
     name: str
+
+
+class DivisionOut(BaseModel):
+    id: int
+    name: str
+
+
+class ClusterOut(BaseModel):
+    id: int
+    name: str
+    division_id: int | None = None
+
+
+class DocumentReferencesOut(BaseModel):
+    documentTypes: list[DocumentTypeOut]
+    legislation: list[LegislationOut]
+    subLegislation: list[SubLegislationOut]
+    divisions: list[DivisionOut]
+    clusters: list[ClusterOut]

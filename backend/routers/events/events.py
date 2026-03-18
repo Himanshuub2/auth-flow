@@ -7,6 +7,7 @@ from models.events.event import Event, EventStatus
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from schemas.events.event import EventOut, EventSavePayload
 from services.events import event_service
+from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user
 from pydantic import BaseModel
 
@@ -48,7 +49,7 @@ def _to_list_out(event: Event) -> EventOut:
         updated_at=event.updated_at,
         change_remarks=event.change_remarks,
         deactivate_remarks=event.deactivate_remarks,
-        deactivated_at=event.deactivated_at,
+        deactivated_at=format_date_dmy_month_abbr(event.deactivated_at) if event.deactivated_at else None,
         files=[],
     )
 
