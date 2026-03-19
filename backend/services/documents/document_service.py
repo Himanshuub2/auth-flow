@@ -37,6 +37,12 @@ from services.documents.document_file_service import (
 logger = logging.getLogger(__name__)
 
 
+SINGLE_ACTIVE_DOCUMENT_TYPES = {
+    DocumentType.FAQ,
+    DocumentType.LATEST_NEWS_AND_ANNOUNCEMENTS,
+}
+
+
 
 def get_allowed_types_for_user(user: CurrentUser) -> list[DocumentType]:
     allowed: list[DocumentType] = []
@@ -67,31 +73,18 @@ async def save_document(
     document_id: int | None = None,
     files: list[UploadFile] | None = None,
 ) -> Document:
-
-    _check_type_permission(user, payload.document_type)
-
-    if payload.document_type == DocumentType.FAQ and payload.linked_document_ids:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="FAQ documents cannot have linked items",
-        )
-
     is_new = document_id is None
 
     if is_new:
-        if payload.document_type == DocumentType.FAQ and payload.status == DocumentStatus.ACTIVE:
-            existing = await _get_active_faq(db, exclude_id=None)
-            if existing is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Active FAQ already exists",
-                )
         doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
         db.add(doc)
         await db.flush()
     else:
         doc = await get_document(db, document_id)
+    _check_type_permission(user, payload.document_type)
+    await _validate_document_save_request(db, payload, doc, is_new=is_new)
 
+    if not is_new:
         if doc.status == DocumentStatus.ACTIVE and payload.status == DocumentStatus.DRAFT:
             doc = await _get_or_create_draft(db, doc, user.id)
         elif doc.status == DocumentStatus.ACTIVE and payload.status == DocumentStatus.ACTIVE:
@@ -138,12 +131,12 @@ async def save_document(
     staging_files = _get_staging_files(doc)
     if payload.status == DocumentStatus.ACTIVE:
         validate_file_count(len(staging_files))
-        if doc.document_type == DocumentType.FAQ:
-            existing = await _get_active_faq(db, exclude_id=doc.id)
+        if doc.document_type in SINGLE_ACTIVE_DOCUMENT_TYPES:
+            existing = await _get_active_singleton_document(db, doc.document_type, exclude_id=doc.id)
             if existing is not None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Active FAQ already exists",
+                    detail=f"Active {doc.document_type.value} already exists",
                 )
 
     if payload.status == DocumentStatus.ACTIVE:
@@ -282,16 +275,6 @@ async def toggle_document_status(
     doc = await get_document(db, document_id)
     _check_type_permission(user, doc.document_type)
 
-    if doc.document_type == DocumentType.FAQ:
-        existing = (await db.execute(select(Document)
-        .where(
-            Document.document_type == DocumentType.FAQ,
-            Document.status == DocumentStatus.ACTIVE,
-            Document.id != document_id,
-        )
-        .limit(1))).scalar_one_or_none()
-        if existing:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Active FAQ already exists")
     if doc.status == DocumentStatus.ACTIVE:
         if not deactivate_remarks or not deactivate_remarks.strip():
             raise HTTPException(
@@ -303,6 +286,13 @@ async def toggle_document_status(
         doc.deactivated_at = func.now()
         doc.deactivated_by = user.id if user else None
     elif doc.status == DocumentStatus.INACTIVE:
+        if doc.document_type in SINGLE_ACTIVE_DOCUMENT_TYPES:
+            existing = await _get_active_singleton_document(db, doc.document_type, exclude_id=document_id)
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Active {doc.document_type.value} already exists",
+                )
         doc.status = DocumentStatus.ACTIVE
         doc.deactivate_remarks = None
         doc.deactivated_at = None
@@ -642,14 +632,61 @@ async def get_revision_snapshot(
 
 
 async def _get_active_faq(db: AsyncSession, exclude_id: int | None = None) -> Document | None:
+    return await _get_active_singleton_document(db, DocumentType.FAQ, exclude_id=exclude_id)
+
+
+async def _get_active_singleton_document(
+    db: AsyncSession,
+    document_type: DocumentType,
+    exclude_id: int | None = None,
+) -> Document | None:
     q = select(Document).where(
-        Document.document_type == DocumentType.FAQ,
+        Document.document_type == document_type,
         Document.status == DocumentStatus.ACTIVE,
     )
     if exclude_id is not None:
         q = q.where(Document.id != exclude_id)
     result = await db.execute(q.limit(1))
     return result.scalar_one_or_none()
+
+
+async def _validate_document_save_request(
+    db: AsyncSession,
+    payload: DocumentSavePayload,
+    existing_doc: Document,
+    *,
+    is_new: bool,
+) -> None:
+    if payload.document_type == DocumentType.FAQ and payload.linked_document_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="FAQ documents cannot have linked items",
+        )
+
+    if not is_new and existing_doc.document_type != payload.document_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="document_type cannot be changed once the document is created",
+        )
+
+    if payload.status != DocumentStatus.ACTIVE:
+        return
+
+    if payload.document_type not in SINGLE_ACTIVE_DOCUMENT_TYPES:
+        return
+
+    existing = await _get_active_singleton_document(
+        db,
+        payload.document_type,
+        exclude_id=None if is_new else existing_doc.id,
+    )
+    if existing is None:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Active {payload.document_type.value} already exists",
+    )
 
 
 async def _validate_linked_ids(
