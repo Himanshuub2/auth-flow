@@ -1,5 +1,5 @@
 # Event Flow Management System
-
+<!-- comment -->
 Multi-step event creation with revision tracking, media versioning, draft support, and applicability controls.
 
 ## Prerequisites
