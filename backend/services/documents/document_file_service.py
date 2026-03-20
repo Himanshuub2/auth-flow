@@ -55,13 +55,26 @@ EXTENSION_TO_SIGNATURE_MIME_TYPES: dict[str, set[str]] = {
     "tiff": {"image/tiff"},
     "pdf": {"application/pdf"},
     # Legacy office formats are OLE Compound File Binary.
-    "doc": {"application/x-cfb"},
-    "xls": {"application/x-cfb"},
-    "ppt": {"application/x-cfb"},
+    # `filetype` may detect and return a more specific MIME (e.g. application/msword),
+    # so we accept both.
+    "doc": {"application/x-cfb", "application/msword"},
+    "xls": {"application/x-cfb", "application/vnd.ms-excel"},
+    "ppt": {"application/x-cfb", "application/vnd.ms-powerpoint"},
     # OOXML formats are ZIP containers by signature.
-    "docx": {"application/zip"},
-    "xlsx": {"application/zip"},
-    "pptx": {"application/zip"},
+    # `filetype` may return a more specific OOXML MIME than plain `application/zip`,
+    # so we accept both.
+    "docx": {
+        "application/zip",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    "xlsx": {
+        "application/zip",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+    "pptx": {
+        "application/zip",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    },
 }
 
 
@@ -131,8 +144,8 @@ def _validate_file_size(size: int, filename: str) -> None:
 
 def _validate_file_signature_for_extension(filename: str, content: bytes) -> None:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    expected = EXTENSION_TO_SIGNATURE_MIME_TYPES.get(ext)
-    if not expected:
+    expected_signature_mimes = EXTENSION_TO_SIGNATURE_MIME_TYPES.get(ext)
+    if not expected_signature_mimes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported extension '.{ext}' for file '{filename}'",
@@ -146,7 +159,11 @@ def _validate_file_signature_for_extension(filename: str, content: bytes) -> Non
         )
 
     actual_mime = guessed.mime.lower()
-    if actual_mime not in expected:
+    # `filetype` may return a specific office mime (e.g. application/msword) or
+    # a container/binary mime (e.g. application/x-cfb, application/zip). Accept
+    # either signature mimes or extension mimes for the same extension.
+    allowed_mimes = expected_signature_mimes | EXTENSION_TO_MIME_TYPES.get(ext, set())
+    if actual_mime not in allowed_mimes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
