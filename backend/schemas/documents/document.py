@@ -24,7 +24,7 @@ class DocumentSavePayload(BaseModel):
     download_allowed: bool = True
     linked_document_ids: list[int] | None = None
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
-    applicability_refs: dict | None = None
+    applicability_refs: dict | list | None = None
     status: DocumentStatus = DocumentStatus.DRAFT
     selected_filenames: list[str] | None = None
     change_remarks: str | None = None
@@ -98,7 +98,7 @@ class DocumentOut(BaseModel):
     next_review_date: date | None
     download_allowed: bool
     applicability_type: ApplicabilityType
-    applicability_refs: dict | None
+    applicability_refs: dict | list | None
     status: DocumentStatus
     current_media_version: int
     current_revision_number: int
@@ -127,7 +127,7 @@ class DocumentRevisionOut(BaseModel):
     tags: list | None
     summary: str | None
     applicability_type: ApplicabilityType
-    applicability_refs: dict | None
+    applicability_refs: dict | list | None
     change_remarks: str | None = None
     deactivate_remarks: str | None = None
     status: str

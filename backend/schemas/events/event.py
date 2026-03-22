@@ -21,7 +21,7 @@ class EventSavePayload(BaseModel):
     description: str | None = None
     tags: list[str] | None = None
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
-    applicability_refs: dict | None = None
+    applicability_refs: dict | list | None = None
     status: EventStatus = EventStatus.DRAFT
     selected_filenames: list[str] | None = None
     file_metadata: list[FileMetadataIn] | None = None
@@ -52,7 +52,7 @@ class EventOut(BaseModel):
     current_revision_number: int
     status: EventStatus
     applicability_type: ApplicabilityType
-    applicability_refs: dict | None
+    applicability_refs: dict | list | None
     replaces_document_id: int | None = None
     created_by: str
     created_by_name: str

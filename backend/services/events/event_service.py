@@ -10,6 +10,7 @@ from models.events.event_media_item import EventMediaItem
 from models.events.user import User
 from schemas.events.event import EventOut, EventSavePayload, FileMetadataIn, MediaFileSummary
 from services.events.media_service import upload_files
+from utils.applicability import validate_applicability_refs
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ async def save_event(
     event_id: int | None = None,
     files: list[UploadFile] | None = None,
 ) -> Event:
+    validate_applicability_refs(payload.applicability_type, payload.applicability_refs)
     is_new = event_id is None
 
     if is_new:
@@ -341,11 +343,19 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
         event.current_media_version = 1
         event.current_revision_number = 0
     else:
-        if await _version_should_bump(db, event):
+        last_rev = _find_latest_revision(event)
+        if not last_rev:
             event.current_media_version += 1
             event.current_revision_number = 0
+        elif _names_changed_vs_revision(event, last_rev) or await _files_differ_between(
+            db, event, 0, event, event.current_media_version
+        ):
+            event.current_media_version += 1
+            event.current_revision_number = 0
+        elif _non_name_metadata_changed_vs_revision(event, last_rev):
+            event.current_revision_number += 1
         else:
-            # Only caption/description changed on files: no new revision
+            # Only caption/description on media items changed
             event.staging_file_ids = []
             event.status = EventStatus.ACTIVE
             return
@@ -374,21 +384,26 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
     parent = await get_event(db, draft.replaces_document_id)
 
     last_rev = _find_latest_revision(parent)
-    details_changed = (
-        draft.event_name != last_rev.event_name
-        or draft.sub_event_name != last_rev.sub_event_name
-        or draft.event_dates != last_rev.event_dates
-        or draft.description != last_rev.description
-        or draft.tags != last_rev.tags
-    ) if last_rev else True
-    files_changed = await _files_differ_between(db, draft, 0, parent, parent.current_media_version)
+    if not last_rev:
+        media_bump = True
+        meta_only = False
+    else:
+        name_changed = _names_changed_vs_revision(draft, last_rev)
+        files_changed = await _files_differ_between(
+            db, draft, 0, parent, parent.current_media_version
+        )
+        media_bump = name_changed or files_changed
+        meta_only = _non_name_metadata_changed_vs_revision(draft, last_rev)
 
-    if details_changed or files_changed:
+    if media_bump:
         draft.current_media_version = parent.current_media_version + 1
         draft.current_revision_number = 0
-    else:
+    elif meta_only:
         draft.current_media_version = parent.current_media_version
         draft.current_revision_number = parent.current_revision_number + 1
+    else:
+        draft.current_media_version = parent.current_media_version
+        draft.current_revision_number = parent.current_revision_number
 
     published_file_ids = list(draft.staging_file_ids or [])
 
@@ -399,19 +414,22 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
     for f in parent_files:
         f.event_id = draft.id
 
-    db.add(EventRevision(
-        event_id=draft.id,
-        media_version=draft.current_media_version,
-        revision_number=draft.current_revision_number,
-        event_name=draft.event_name,
-        sub_event_name=draft.sub_event_name,
-        event_dates=draft.event_dates,
-        description=draft.description,
-        tags=draft.tags,
-        change_remarks=draft.change_remarks,
-        file_ids=published_file_ids,
-        created_by=draft.created_by,
-    ))
+    if media_bump or meta_only:
+        db.add(EventRevision(
+            event_id=draft.id,
+            media_version=draft.current_media_version,
+            revision_number=draft.current_revision_number,
+            event_name=draft.event_name,
+            sub_event_name=draft.sub_event_name,
+            event_dates=draft.event_dates,
+            description=draft.description,
+            tags=draft.tags,
+            change_remarks=draft.change_remarks,
+            file_ids=published_file_ids,
+            created_by=draft.created_by,
+        ))
+    elif last_rev is not None:
+        last_rev.file_ids = list(published_file_ids)
 
     parent.status = EventStatus.INACTIVE
     draft.status = EventStatus.ACTIVE
@@ -431,20 +449,20 @@ def _find_latest_revision(event: Event) -> EventRevision | None:
     return max(event.revisions, key=lambda r: (r.media_version, r.revision_number))
 
 
-async def _version_should_bump(db: AsyncSession, event: Event) -> bool:
-    """True if event details or file set changed. Caption/description-only changes do not bump."""
-    last_rev = _find_latest_revision(event)
-    if not last_rev:
-        return True
-    if event.event_name != last_rev.event_name or event.sub_event_name != last_rev.sub_event_name:
-        return True
-    if event.event_dates != last_rev.event_dates or event.description != last_rev.description:
-        return True
-    if event.tags != last_rev.tags:
-        return True
-    if await _files_differ_between(db, event, 0, event, event.current_media_version):
-        return True
-    return False
+def _names_changed_vs_revision(event: Event, last_rev: EventRevision) -> bool:
+    return (
+        event.event_name != last_rev.event_name
+        or event.sub_event_name != last_rev.sub_event_name
+    )
+
+
+def _non_name_metadata_changed_vs_revision(event: Event, last_rev: EventRevision) -> bool:
+    return (
+        event.event_dates != last_rev.event_dates
+        or event.description != last_rev.description
+        or event.tags != last_rev.tags
+        or event.change_remarks != last_rev.change_remarks
+    )
 
 
 async def _get_all_files(db: AsyncSession, event_id: int) -> list[EventMediaItem]:

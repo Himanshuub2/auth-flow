@@ -34,6 +34,7 @@ from services.documents.document_file_service import (
     upload_document_files,
     validate_file_count,
 )
+from utils.applicability import validate_applicability_refs
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ async def save_document(
 ) -> Document:
     is_new = document_id is None
     _check_type_permission(user, payload.document_type)
+    validate_applicability_refs(payload.applicability_type, payload.applicability_refs)
 
     if is_new:
         doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
@@ -373,8 +375,9 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
     if applicability.upper() == "DIVISION":
         if not user.division_cluster:
             return query.where(Document.applicability_type == ApplicabilityType.ALL)
-        # JSON array contains single-element array: refs @> '["DivisionName"]'::jsonb
-        ref_match = Document.applicability_refs.contains([user.division_cluster])
+        div_match = Document.applicability_refs.contains({"divisions": [user.division_cluster]})
+        desig_match = Document.applicability_refs.contains({"designations": [user.designation]})
+        ref_match = or_(div_match, desig_match)
         return query.where(
             or_(
                 Document.applicability_type == ApplicabilityType.ALL,
