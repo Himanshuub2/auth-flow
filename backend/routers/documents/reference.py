@@ -9,7 +9,7 @@ from database import get_db
 from models.documents.document import DOCUMENT_TYPE_LABELS
 from models.documents.legislation import Legislation, SubLegislation
 from schemas.documents.reference import (
-    ClusterOut,
+    DesignationOut,
     DivisionOut,
     DocumentReferencesOut,
     DocumentTypeOut,
@@ -65,15 +65,20 @@ async def get_document_references(
         DivisionOut(id=4, name="Finance"),
     ]
 
-    # Clusters – no dedicated model yet, so return empty list for future extension
-    clusters: list[ClusterOut] = []
+    # Designations (hardcoded for now)
+    designations = [
+        DesignationOut(id=1, name="Administrator"),
+        DesignationOut(id=2, name="DVM"),
+        DesignationOut(id=3, name="Manager"),
+        DesignationOut(id=4, name="Executive"),
+    ]
 
     data = DocumentReferencesOut(
         documentTypes=document_types,
         legislation=legislation,
         subLegislation=sub_legislation,
         divisions=divisions,
-        clusters=clusters,
+        designations=designations,
     )
 
     return APIResponse(

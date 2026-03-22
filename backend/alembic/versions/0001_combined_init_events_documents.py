@@ -160,7 +160,7 @@ def upgrade() -> None:
     op.execute(sa.text(
         f"DO $$ BEGIN CREATE TYPE {DOCUMENTS}.document_type AS ENUM ("
         "'POLICY','GUIDANCE_NOTE','LAW_REGULATION','TRAINING_MATERIAL',"
-        "'EWS','FAQ','LATEST_NEWS_AND_ANNOUNCEMENTS'"
+        "'EWS','FAQ','LATEST_NEWS_AND_ANNOUNCEMENTS','FLYER'"
         "); EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
     ))
     op.execute(sa.text(
@@ -206,7 +206,7 @@ def upgrade() -> None:
             "document_type",
             postgresql.ENUM(
                 "POLICY", "GUIDANCE_NOTE", "LAW_REGULATION", "TRAINING_MATERIAL",
-                "EWS", "FAQ", "LATEST_NEWS_AND_ANNOUNCEMENTS",
+                "EWS", "FAQ", "LATEST_NEWS_AND_ANNOUNCEMENTS","FLYER",
                 name="document_type", schema=DOCUMENTS, create_type=False,
             ),
             nullable=False,
@@ -270,7 +270,7 @@ def upgrade() -> None:
             "document_type",
             postgresql.ENUM(
                 "POLICY", "GUIDANCE_NOTE", "LAW_REGULATION", "TRAINING_MATERIAL",
-                "EWS", "FAQ", "LATEST_NEWS_AND_ANNOUNCEMENTS",
+                "EWS", "FAQ", "LATEST_NEWS_AND_ANNOUNCEMENTS","FLYER",
                 name="document_type", schema=DOCUMENTS, create_type=False,
             ),
             nullable=False,

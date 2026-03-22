@@ -31,10 +31,9 @@ class DivisionOut(BaseModel):
     name: str
 
 
-class ClusterOut(BaseModel):
+class DesignationOut(BaseModel):
     id: int
     name: str
-    division_id: int | None = None
 
 
 class DocumentReferencesOut(BaseModel):
@@ -42,4 +41,4 @@ class DocumentReferencesOut(BaseModel):
     legislation: list[LegislationOut]
     subLegislation: list[SubLegislationOut]
     divisions: list[DivisionOut]
-    clusters: list[ClusterOut]
+    designations: list[DesignationOut]

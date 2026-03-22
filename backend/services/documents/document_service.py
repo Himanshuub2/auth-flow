@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
@@ -74,6 +75,7 @@ async def save_document(
     files: list[UploadFile] | None = None,
 ) -> Document:
     is_new = document_id is None
+    _check_type_permission(user, payload.document_type)
 
     if is_new:
         doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
@@ -81,7 +83,6 @@ async def save_document(
         await db.flush()
     else:
         doc = await get_document(db, document_id)
-    _check_type_permission(user, payload.document_type)
     await _validate_document_save_request(db, payload, doc, is_new=is_new)
 
     if not is_new:
@@ -180,6 +181,7 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         select(Document, User.username.label("created_by_name"))
         .join(User, Document.created_by == User.staff_id)
         .where(Document.id == document_id)
+        .options(selectinload(Document.revisions), selectinload(Document.files))
     )
     one = row.one_or_none()
     if not one:
@@ -187,9 +189,8 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
     doc, created_by_name = one[0], one[1]
     ver = doc.current_media_version
 
-    file_ids = await _get_file_ids_for_version(db, doc, ver)
-    all_files = await _get_all_files(db, document_id)
-    file_by_id = {f.id: f for f in all_files}
+    file_ids = _get_file_ids_for_version_sync(doc, ver)
+    file_by_id = {f.id: f for f in doc.files}
     version_files = [file_by_id[fid] for fid in file_ids if fid in file_by_id]
 
     files = [
@@ -361,31 +362,33 @@ async def get_linked_document_details(
 # ── Knowledge Hub ────────────────────────────────────────────────────────
 
 HUB_NEW_DAYS = 2  # Documents created in the last N days are shown as "new"
+HUB_MAX_PAGE_SIZE = 100
 
 
 def _apply_applicability_filter(query, user: CurrentUser, applicability: str | None):
-
+    """Filter hub/list queries by applicability. Uses JSONB @> where possible (GIN-friendly)."""
     if not applicability or applicability.upper() == "ALL":
         return query
 
     if applicability.upper() == "DIVISION":
         if not user.division_cluster:
             return query.where(Document.applicability_type == ApplicabilityType.ALL)
+        # JSON array contains single-element array: refs @> '["DivisionName"]'::jsonb
+        ref_match = Document.applicability_refs.contains([user.division_cluster])
         return query.where(
             or_(
                 Document.applicability_type == ApplicabilityType.ALL,
-                (Document.applicability_type == ApplicabilityType.DIVISION)
-                & func.cast(Document.applicability_refs, SAString).contains(user.division_cluster),
+                (Document.applicability_type == ApplicabilityType.DIVISION) & ref_match,
             )
         )
 
     if applicability.upper() == "EMPLOYEE":
-        # For EMPLOYEE applicability, we now store and match on user email, not numeric IDs.
+        # Match user email as a JSON array element (same storage as division list).
+        ref_match = Document.applicability_refs.contains([user.email])
         return query.where(
             or_(
                 Document.applicability_type == ApplicabilityType.ALL,
-                (Document.applicability_type == ApplicabilityType.EMPLOYEE)
-                & func.cast(Document.applicability_refs, SAString).contains(user.email),
+                (Document.applicability_type == ApplicabilityType.EMPLOYEE) & ref_match,
             )
         )
 
@@ -426,18 +429,59 @@ def _resolve_doc_types(raw: list[str] | None) -> list[DocumentType]:
     return result
 
 
-def _hub_query_for_type(dt: DocumentType, user: CurrentUser, applicability: str | None, search: str | None):
-    q = (
-        select(Document.id, Document.name, Document.created_at)
-        .where(
-            Document.status == DocumentStatus.ACTIVE,
-            Document.replaces_document_id.is_(None),
-            Document.document_type == dt,
+def _hub_ranked_subquery(
+    type_enums: list[DocumentType],
+    user: CurrentUser,
+    applicability: str | None,
+    search: str | None,
+):
+    """Partitioned row numbers per document_type for hub paging (avoids N queries per type)."""
+    rn = (
+        func.row_number()
+        .over(
+            partition_by=Document.document_type,
+            order_by=Document.updated_at.desc(),
         )
+        .label("rn")
     )
-    q = _apply_applicability_filter(q, user, applicability)
-    q = _apply_search_filter(q, search)
-    return q
+    inner = select(
+        Document.id,
+        Document.name,
+        Document.created_at,
+        Document.document_type,
+        rn,
+    ).where(
+        Document.status == DocumentStatus.ACTIVE,
+        Document.replaces_document_id.is_(None),
+        Document.document_type.in_(type_enums),
+    )
+    inner = _apply_applicability_filter(inner, user, applicability)
+    inner = _apply_search_filter(inner, search)
+    return inner.subquery("hub_ranked")
+
+
+async def _hub_counts_by_type(
+    db: AsyncSession,
+    type_enums: list[DocumentType],
+    user: CurrentUser,
+    applicability: str | None,
+    search: str | None,
+    *,
+    created_after: datetime | None = None,
+) -> dict[DocumentType, int]:
+    """Single grouped COUNT per document_type (no subquery wrapper)."""
+    stmt = select(Document.document_type, func.count().label("cnt")).where(
+        Document.status == DocumentStatus.ACTIVE,
+        Document.replaces_document_id.is_(None),
+        Document.document_type.in_(type_enums),
+    )
+    if created_after is not None:
+        stmt = stmt.where(Document.created_at >= created_after)
+    stmt = _apply_applicability_filter(stmt, user, applicability)
+    stmt = _apply_search_filter(stmt, search)
+    stmt = stmt.group_by(Document.document_type)
+    rows = (await db.execute(stmt)).all()
+    return {row[0]: int(row[1]) for row in rows}
 
 
 async def get_document_hub(
@@ -457,84 +501,129 @@ async def get_document_hub(
     items for that page (for FE to append). Otherwise return all types with first
     page_size items each (initial load).
     """
+    if page < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="page must be >= 1",
+        )
+    if page_size < 1 or page_size > HUB_MAX_PAGE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"page_size must be between 1 and {HUB_MAX_PAGE_SIZE}",
+        )
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=HUB_NEW_DAYS)
 
     if load_more_type is not None and load_more_page is not None:
-        # Load-more: single category, single page of items
-        doc_type_enum = LABEL_TO_DOCUMENT_TYPE.get(load_more_type.strip())
+        load_more_stripped = load_more_type.strip()
+        if not load_more_stripped:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid document type for load more",
+            )
+        if load_more_page < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="load_more_page must be >= 1",
+            )
+        doc_type_enum = LABEL_TO_DOCUMENT_TYPE.get(load_more_stripped)
         if doc_type_enum is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid document type for load more: {load_more_type}",
             )
         type_enums = [doc_type_enum]
-        per_type_page = {doc_type_enum: load_more_page}
+        is_load_more = True
     else:
         type_enums = _resolve_doc_types(doc_types)
-        per_type_page = {dt: 1 for dt in type_enums}
+        is_load_more = False
 
-    categories: list[DocumentHubCategory] = []
+    if not type_enums:
+        return DocumentHubOut(categories=[])
 
-    for dt in type_enums:
-        q = _hub_query_for_type(dt, user, applicability, search)
+    # Two grouped COUNT queries for all types (instead of 2N subquery counts).
+    totals = await _hub_counts_by_type(db, type_enums, user, applicability, search)
+    new_counts = await _hub_counts_by_type(
+        db, type_enums, user, applicability, search, created_after=cutoff
+    )
 
-        count_q = select(func.count()).select_from(q.subquery())
-        total = (await db.execute(count_q)).scalar() or 0
-
-        new_count_q = (
-            select(Document)
-            .where(
-                Document.status == DocumentStatus.ACTIVE,
-                Document.replaces_document_id.is_(None),
-                Document.document_type == dt,
-                Document.created_at >= cutoff,
-            )
+    # One ranked query for hub rows (window over document_type).
+    ranked = _hub_ranked_subquery(type_enums, user, applicability, search)
+    if is_load_more:
+        assert load_more_page is not None
+        doc_type_enum = type_enums[0]
+        lo = load_more_page
+        hi = lo * page_size
+        lo_rn = (lo - 1) * page_size
+        page_stmt = select(
+            ranked.c.id,
+            ranked.c.name,
+            ranked.c.created_at,
+            ranked.c.document_type,
+        ).where(
+            ranked.c.document_type == doc_type_enum,
+            ranked.c.rn > lo_rn,
+            ranked.c.rn <= hi,
         )
-        new_count_q = _apply_applicability_filter(new_count_q, user, applicability)
-        new_count_q = _apply_search_filter(new_count_q, search)
-        new_count = (await db.execute(select(func.count()).select_from(new_count_q.subquery()))).scalar() or 0
+    else:
+        page_stmt = select(
+            ranked.c.id,
+            ranked.c.name,
+            ranked.c.created_at,
+            ranked.c.document_type,
+        ).where(ranked.c.rn <= page_size)
 
-        page_for_type = per_type_page[dt]
-        rows = (await db.execute(
-            q.order_by(Document.updated_at.desc())
-            .offset((page_for_type - 1) * page_size)
-            .limit(page_size)
-        )).all()
+    page_rows = (await db.execute(page_stmt)).all()
 
-        items = [
+    items_by_type: dict[DocumentType, list[DocumentHubItem]] = defaultdict(list)
+    for r in page_rows:
+        dt = r.document_type
+        items_by_type[dt].append(
             DocumentHubItem(
                 id=r.id,
                 name=r.name,
                 isNew=r.created_at >= cutoff if r.created_at else False,
             )
-            for r in rows
-        ]
+        )
 
+    categories: list[DocumentHubCategory] = []
+    for dt in type_enums:
+        total = totals.get(dt, 0)
+        new_count = new_counts.get(dt, 0)
+        items = items_by_type.get(dt, [])
         if items or (doc_types is not None and doc_types) or (load_more_type is not None):
-            categories.append(DocumentHubCategory(
-                document_type=DOCUMENT_TYPE_LABELS.get(dt, dt.value),
-                total=total,
-                new_count=new_count,
-                items=items,
-            ))
+            categories.append(
+                DocumentHubCategory(
+                    document_type=DOCUMENT_TYPE_LABELS.get(dt, dt.value),
+                    total=total,
+                    new_count=new_count,
+                    items=items,
+                )
+            )
 
     return DocumentHubOut(categories=categories)
 
 
 async def list_revisions(db: AsyncSession, document_id: int) -> list[DocumentRevision]:
-    await get_document(db, document_id)
     result = await db.execute(
         select(DocumentRevision)
         .where(DocumentRevision.document_id == document_id)
         .order_by(DocumentRevision.media_version.desc(), DocumentRevision.revision_number.desc())
     )
-    return list(result.scalars().all())
+    revs = list(result.scalars().all())
+    if revs:
+        return revs
+    doc_exists = (
+        await db.execute(select(Document.id).where(Document.id == document_id))
+    ).scalar_one_or_none()
+    if doc_exists is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return []
 
 
 async def get_revision(
     db: AsyncSession, document_id: int, media_version: int, revision_number: int,
 ) -> DocumentRevision:
-    await get_document(db, document_id)
     result = await db.execute(
         select(DocumentRevision)
         .where(
@@ -548,9 +637,10 @@ async def get_revision(
         )
     )
     rev = result.scalar_one_or_none()
-    if not rev:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Revision not found")
-    return rev
+    if rev:
+        return rev
+    await get_document(db, document_id)
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Revision not found")
 
 
 def _compute_media_versions(file_id: int, doc: Document) -> list[int]:
@@ -696,17 +786,23 @@ async def _validate_linked_ids(
 ) -> None:
     if not linked_ids:
         return
-    if len(linked_ids) > 6:
+    unique_ids = list(dict.fromkeys(linked_ids))
+    if len(unique_ids) != len(linked_ids):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Duplicate linked document ids are not allowed",
+        )
+    if len(unique_ids) > 6:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Maximum 6 linked items allowed",
         )
     result = await db.execute(
         select(Document.id, Document.document_type, Document.status)
-        .where(Document.id.in_(linked_ids))
+        .where(Document.id.in_(unique_ids))
     )
     found = {row.id: row for row in result.all()}
-    for lid in linked_ids:
+    for lid in unique_ids:
         if lid == current_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -762,7 +858,7 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
     db.add(draft)
     await db.flush()
 
-    new_staging_ids: list[int] = []
+    new_files: list[DocumentFile] = []
     for fid in parent_file_ids:
         pf = parent_file_by_id.get(fid)
         if not pf:
@@ -776,11 +872,9 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
             sort_order=pf.sort_order,
         )
         db.add(new_file)
-        await db.flush()
-        new_staging_ids.append(new_file.id)
-
-    draft.staging_file_ids = new_staging_ids
+        new_files.append(new_file)
     await db.flush()
+    draft.staging_file_ids = [f.id for f in new_files]
     return draft
 
 
