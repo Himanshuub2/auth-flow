@@ -94,12 +94,21 @@ class AzureBlobStorageBackend(StorageBackend):
     async def _get_container(self):
         return self._client.get_container_client(self._container_name)
 
-    async def save(self, file: UploadFile, destination: str) -> str:
+    async def save(
+        self,
+        file: UploadFile,
+        destination: str,
+        *,
+        content_type: str | None = None,
+        content_disposition: str | None = None,
+    ) -> str:
         if self._bypass:
             logger.debug("Bypass: skipping Azure upload for %s", destination)
             return destination
 
         try:
+            from azure.storage.blob import ContentSettings  # type: ignore[attr-defined]
+
             container = await self._get_container()
             blob = container.get_blob_client(destination)
 
@@ -110,10 +119,18 @@ class AzureBlobStorageBackend(StorageBackend):
                         break
                     yield chunk
 
+            content_settings = None
+            if content_type or content_disposition:
+                content_settings = ContentSettings(
+                    content_type=content_type,
+                    content_disposition=content_disposition,
+                )
+
             await blob.upload_blob(
                 _chunk_reader(),
                 overwrite=True,
                 max_concurrency=4,
+                content_settings=content_settings,
             )
             logger.info("Azure blob saved: %s/%s", self._container_name, destination)
             return destination

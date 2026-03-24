@@ -1,7 +1,6 @@
 import logging
 import uuid
 
-import filetype
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,15 +12,18 @@ from schemas.events.event import FileMetadataIn
 from services.documents.document_file_service import (
     ALLOWED_IMAGE_MIME_TYPES,
     EXTENSION_TO_MIME_TYPES,
-    EXTENSION_TO_SIGNATURE_MIME_TYPES,
 )
 from storage import get_storage
+from utils.magic_bytes import (
+    normalize_content_type,
+    read_prefix_and_rewind,
+    validate_magic_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_VIDEO_MIME_TYPES = frozenset({"video/mp4", "application/mp4"})
 VIDEO_EXTENSION_TO_MIME_TYPES: dict[str, set[str]] = {"mp4": set(ALLOWED_VIDEO_MIME_TYPES)}
-VIDEO_EXTENSION_TO_SIGNATURE_MIME_TYPES: dict[str, set[str]] = {"mp4": set(ALLOWED_VIDEO_MIME_TYPES)}
 
 
 def _classify_file(filename: str) -> FileType:
@@ -41,18 +43,7 @@ def _is_thumbnail_extension(filename: str) -> bool:
     return ext in settings.ALLOWED_IMAGE_EXTENSIONS
 
 
-def _validate_file_size(file_type: FileType, size: int, filename: str) -> None:
-    limit = settings.MAX_IMAGE_SIZE_BYTES if file_type == FileType.IMAGE else settings.MAX_VIDEO_SIZE_BYTES
-    if size > limit:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File '{filename}' exceeds the {limit // (1024*1024)}MB limit",
-        )
-
-
-def _validate_event_mime_and_signature(
-    filename: str, content_type: str | None, content: bytes, file_type: FileType
-) -> None:
+def _validate_event_mime_type(filename: str, content_type: str | None, file_type: FileType) -> None:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if not ext:
         raise HTTPException(
@@ -62,11 +53,9 @@ def _validate_event_mime_and_signature(
 
     if file_type == FileType.IMAGE:
         mime_map = EXTENSION_TO_MIME_TYPES
-        sig_map = EXTENSION_TO_SIGNATURE_MIME_TYPES
         category_allowed = ALLOWED_IMAGE_MIME_TYPES
     else:
         mime_map = VIDEO_EXTENSION_TO_MIME_TYPES
-        sig_map = VIDEO_EXTENSION_TO_SIGNATURE_MIME_TYPES
         category_allowed = ALLOWED_VIDEO_MIME_TYPES
 
     normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
@@ -98,30 +87,25 @@ def _validate_event_mime_and_signature(
             ),
         )
 
-    expected_signature_mimes = sig_map.get(ext)
-    if not expected_signature_mimes:
+
+def _validate_event_upload_size(file: UploadFile, filename: str, file_type: FileType) -> None:
+    """Enforce max size when UploadFile.size is set (multipart Content-Length)."""
+    limit = settings.MAX_IMAGE_SIZE_BYTES if file_type == FileType.IMAGE else settings.MAX_VIDEO_SIZE_BYTES
+    sz = getattr(file, "size", None)
+    if sz is None or not isinstance(sz, int) or sz < 0:
+        return
+    if sz > limit:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported extension '.{ext}' for file '{filename}'",
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File '{filename}' exceeds the {limit // (1024 * 1024)}MB limit",
         )
 
-    guessed = filetype.guess(content)
-    if guessed is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not verify file content type for '{filename}'",
-        )
 
-    actual_mime = guessed.mime.lower()
-    allowed_mimes = expected_signature_mimes | mime_map.get(ext, set())
-    if actual_mime not in allowed_mimes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"File content type '{actual_mime}' does not match "
-                f"extension '.{ext}' for file '{filename}'"
-            ),
-        )
+def _event_magic_mimes_for_extension(ext: str, file_type: FileType) -> frozenset[str]:
+    if file_type == FileType.IMAGE:
+        allowed = EXTENSION_TO_MIME_TYPES.get(ext)
+        return frozenset(allowed) if allowed else frozenset()
+    return frozenset({"video/mp4", "application/mp4"})
 
 
 async def upload_files(
@@ -143,85 +127,107 @@ async def upload_files(
 
     storage = get_storage()
     thumb_urls: dict[str, str] = {}
+    uploaded_paths: list[str] = []
 
-    for file in files:
-        filename = file.filename or "unknown"
-        if filename not in thumbnail_filenames:
-            continue
-        try:
-            content = await file.read()
-            if not _is_thumbnail_extension(filename):
-                await file.seek(0)
-                logger.warning("Thumbnail file %s is not an image; skipping", filename)
-                continue
-            _validate_event_mime_and_signature(filename, file.content_type, content, FileType.IMAGE)
-            _validate_file_size(FileType.IMAGE, len(content), filename)
-            await file.seek(0)
-            ext = filename.rsplit(".", 1)[-1].lower()
-            dest_path = f"{event_id}/thumb_{uuid.uuid4().hex}.{ext}"
-            await storage.save(file, dest_path)
-            thumb_urls[filename] = storage.get_url(dest_path)
-            logger.debug("Uploaded thumbnail %s for event %s", filename, event_id)
-        except Exception as e:
-            logger.exception("Failed to upload thumbnail %s: %s", filename, e)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Thumbnail upload failed: {filename}",
-            ) from e
-
-    saved: list[EventMediaItem] = []
+    # Per file: extension/type → size → MIME → magic prefix (no upload until all pass).
     for file in files:
         filename = file.filename or "unknown"
         if filename in thumbnail_filenames:
-            continue
-
-        file_type = _classify_file(filename)
-        content = await file.read()
-        file_size = len(content)
-        _validate_event_mime_and_signature(filename, file.content_type, content, file_type)
-        _validate_file_size(file_type, file_size, filename)
-        await file.seek(0)
-
-        meta = meta_by_name.get(filename)
-        thumbnail_url = None
-        if meta and meta.thumbnail_original_filename:
-            thumbnail_url = thumb_urls.get(meta.thumbnail_original_filename)
-
-        existing = (await db.execute(
-            select(EventMediaItem).where(
-                EventMediaItem.event_id == event_id,
-                EventMediaItem.original_filename == filename,
-            ).limit(1)
-        )).scalar_one_or_none()
-
-        if existing:
-            if meta:
-                existing.caption = meta.caption
-                existing.description = meta.description
-                if thumbnail_url is not None:
-                    existing.thumbnail_url = thumbnail_url
-            saved.append(existing)
-            continue
+            if not _is_thumbnail_extension(filename):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Thumbnail file '{filename}' must be an image",
+                )
+            file_type = FileType.IMAGE
+        else:
+            file_type = _classify_file(filename)
 
         ext = filename.rsplit(".", 1)[-1].lower()
-        dest_path = f"{event_id}/{uuid.uuid4().hex}.{ext}"
-        await storage.save(file, dest_path)
+        _validate_event_upload_size(file, filename, file_type)
+        _validate_event_mime_type(filename, file.content_type, file_type)
+        prefix = await read_prefix_and_rewind(file)
+        validate_magic_prefix(filename, prefix, _event_magic_mimes_for_extension(ext, file_type))
 
-        item = EventMediaItem(
-            event_id=event_id,
-            file_type=file_type,
-            file_url=storage.get_url(dest_path),
-            thumbnail_url=thumbnail_url,
-            caption=meta.caption if meta else None,
-            description=meta.description if meta else None,
-            sort_order=len(saved),
-            file_size_bytes=file_size,
-            original_filename=filename,
-        )
-        db.add(item)
-        saved.append(item)
+    # Thumbnails first so thumb_urls is filled before main items that reference them.
+    thumb_files = [f for f in files if (f.filename or "unknown") in thumbnail_filenames]
+    main_files = [f for f in files if (f.filename or "unknown") not in thumbnail_filenames]
+    upload_order = thumb_files + main_files
 
-    await db.flush()
+    saved: list[EventMediaItem] = []
+    try:
+        for file in upload_order:
+            filename = file.filename or "unknown"
+            ext = filename.rsplit(".", 1)[-1].lower()
+            dest_path = f"{event_id}/{uuid.uuid4().hex}.{ext}"
+            await file.seek(0)
+            ct = normalize_content_type(file.content_type)
+            await storage.save(
+                file,
+                dest_path,
+                content_type=ct or None,
+            )
+            uploaded_paths.append(dest_path)
+            public_url = storage.get_url(dest_path)
+
+            if filename in thumbnail_filenames:
+                thumb_urls[filename] = public_url
+                logger.debug("Uploaded thumbnail %s for event %s", filename, event_id)
+                continue
+
+            file_type = _classify_file(filename)
+            raw_size = getattr(file, "size", 0)
+            file_size = raw_size if isinstance(raw_size, int) and raw_size >= 0 else 0
+
+            meta = meta_by_name.get(filename)
+            thumbnail_url = None
+            if meta and meta.thumbnail_original_filename:
+                thumbnail_url = thumb_urls.get(meta.thumbnail_original_filename)
+
+            existing = (await db.execute(
+                select(EventMediaItem).where(
+                    EventMediaItem.event_id == event_id,
+                    EventMediaItem.original_filename == filename,
+                ).limit(1)
+            )).scalar_one_or_none()
+
+            if existing:
+                if meta:
+                    existing.caption = meta.caption
+                    existing.description = meta.description
+                    if thumbnail_url is not None:
+                        existing.thumbnail_url = thumbnail_url
+                saved.append(existing)
+                continue
+
+            item = EventMediaItem(
+                event_id=event_id,
+                file_type=file_type,
+                file_url=public_url,
+                thumbnail_url=thumbnail_url,
+                caption=meta.caption if meta else None,
+                description=meta.description if meta else None,
+                sort_order=len(saved),
+                file_size_bytes=file_size,
+                original_filename=filename,
+            )
+            db.add(item)
+            saved.append(item)
+
+        await db.flush()
+    except Exception as exc:
+        for path in reversed(uploaded_paths):
+            try:
+                await storage.delete(path)
+            except Exception:
+                logger.warning("Failed to rollback uploaded file: %s", path, exc_info=True)
+
+        if isinstance(exc, HTTPException):
+            raise
+        logger.exception("Failed to upload event files for event %s", event_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Upload failed; no files were saved",
+        ) from exc
     logger.info("Uploaded %d files for event %s (with metadata)", len(saved), event_id)
     return saved
 

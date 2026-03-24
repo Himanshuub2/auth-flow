@@ -1,7 +1,6 @@
 import logging
 import uuid
 
-import filetype
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +9,11 @@ from config import settings
 from models.documents.document import DOCUMENT_TYPE_ALLOWED_EXTENSIONS, DocumentType
 from models.documents.document_file import DocumentFile, DocumentFileType
 from storage import get_storage
+from utils.magic_bytes import (
+    normalize_content_type,
+    read_prefix_and_rewind,
+    validate_magic_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,23 +50,12 @@ EXTENSION_TO_MIME_TYPES: dict[str, set[str]] = {
     "ppt": {"application/vnd.ms-powerpoint"},
     "pptx": {"application/vnd.openxmlformats-officedocument.presentationml.presentation"},
 }
-EXTENSION_TO_SIGNATURE_MIME_TYPES: dict[str, set[str]] = {
-    "png": {"image/png"},
-    "jpg": {"image/jpeg"},
-    "jpeg": {"image/jpeg"},
-    "gif": {"image/gif"},
-    "bmp": {"image/bmp"},
-    "tiff": {"image/tiff"},
-    "pdf": {"application/pdf"},
-    # Legacy office formats are OLE Compound File Binary.
-    # `filetype` may detect and return a more specific MIME (e.g. application/msword),
-    # so we accept both.
+
+# Extra types `filetype` may return for the first bytes (OLE / ZIP containers).
+EXTENSION_MAGIC_EXTRAS: dict[str, set[str]] = {
     "doc": {"application/x-cfb", "application/msword"},
     "xls": {"application/x-cfb", "application/vnd.ms-excel"},
     "ppt": {"application/x-cfb", "application/vnd.ms-powerpoint"},
-    # OOXML formats are ZIP containers by signature.
-    # `filetype` may return a more specific OOXML MIME than plain `application/zip`,
-    # so we accept both.
     "docx": {
         "application/zip",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -76,6 +69,13 @@ EXTENSION_TO_SIGNATURE_MIME_TYPES: dict[str, set[str]] = {
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     },
 }
+
+
+def _extension_magic_mimes(ext: str) -> frozenset[str]:
+    base = EXTENSION_TO_MIME_TYPES.get(ext)
+    if not base:
+        return frozenset()
+    return frozenset(base | EXTENSION_MAGIC_EXTRAS.get(ext, set()))
 
 
 def _classify_doc_file(filename: str) -> DocumentFileType:
@@ -134,42 +134,16 @@ def _validate_mime_type_for_extension(filename: str, content_type: str | None) -
         )
 
 
-def _validate_file_size(size: int, filename: str) -> None:
-    if size > settings.MAX_DOCUMENT_FILE_SIZE_BYTES:
+def _validate_document_upload_size(file: UploadFile, filename: str) -> None:
+    """Enforce max size when the multipart part exposes Content-Length (UploadFile.size)."""
+    limit = settings.MAX_DOCUMENT_FILE_SIZE_BYTES
+    sz = getattr(file, "size", None)
+    if sz is None or not isinstance(sz, int) or sz < 0:
+        return
+    if sz > limit:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File '{filename}' exceeds the {settings.MAX_DOCUMENT_FILE_SIZE_BYTES // (1024*1024)}MB limit",
-        )
-
-
-def _validate_file_signature_for_extension(filename: str, content: bytes) -> None:
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    expected_signature_mimes = EXTENSION_TO_SIGNATURE_MIME_TYPES.get(ext)
-    if not expected_signature_mimes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported extension '.{ext}' for file '{filename}'",
-        )
-
-    guessed = filetype.guess(content)
-    if guessed is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not verify file content type for '{filename}'",
-        )
-
-    actual_mime = guessed.mime.lower()
-    # `filetype` may return a specific office mime (e.g. application/msword) or
-    # a container/binary mime (e.g. application/x-cfb, application/zip). Accept
-    # either signature mimes or extension mimes for the same extension.
-    allowed_mimes = expected_signature_mimes | EXTENSION_TO_MIME_TYPES.get(ext, set())
-    if actual_mime not in allowed_mimes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"File content type '{actual_mime}' does not match "
-                f"extension '.{ext}' for file '{filename}'"
-            ),
+            detail=f"File '{filename}' exceeds the {limit // (1024 * 1024)}MB limit",
         )
 
 
@@ -197,7 +171,7 @@ async def upload_document_files(
 
     storage = get_storage()
     saved: list[DocumentFile] = []
-    validated_files: dict[str, int] = {}
+    uploaded_paths: list[str] = []
 
     # Enforce max file counts before uploading or saving anything
     existing_count = (await db.execute(
@@ -220,55 +194,86 @@ async def upload_document_files(
                 detail=f"Maximum {MAX_FILES} files allowed",
             )
 
-    # Validate all files first so no partial upload happens on failure.
+    # Validate all files in order before any upload: type → size → MIME → magic prefix.
     for file in files:
         filename = file.filename or "unknown"
         _validate_extension_for_type(filename, document_type)
-        _validate_mime_type_for_extension(filename, file.content_type)
-        content = await file.read()
-        file_size = len(content)
-        _validate_file_size(file_size, filename)
-        _validate_file_signature_for_extension(filename, content)
-        validated_files[filename] = file_size
-        await file.seek(0)
 
     for file in files:
         filename = file.filename or "unknown"
-        file_size = validated_files.get(filename, 0)
-        await file.seek(0)
+        _validate_document_upload_size(file, filename)
 
-        file_type = _classify_doc_file(filename)
+    for file in files:
+        filename = file.filename or "unknown"
+        _validate_mime_type_for_extension(filename, file.content_type)
 
-        existing = (await db.execute(
-            select(DocumentFile).where(
-                DocumentFile.document_id == document_id,
-                DocumentFile.original_filename == filename,
-            ).limit(1)
-        )).scalar_one_or_none()
-
-        if existing:
-            saved.append(existing)
-            continue
-
+    for file in files:
+        filename = file.filename or "unknown"
         ext = filename.rsplit(".", 1)[-1].lower()
-        if document_type == DocumentType.FAQ:
-            dest_path = f"documents/faqs/{uuid.uuid4().hex}.{ext}"
-        else:
-            dest_path = f"documents/{uuid.uuid4().hex}.{ext}"
-        await storage.save(file, dest_path)
+        prefix = await read_prefix_and_rewind(file)
+        validate_magic_prefix(filename, prefix, _extension_magic_mimes(ext))
 
-        item = DocumentFile(
-            document_id=document_id,
-            file_type=file_type,
-            file_url=storage.get_url(dest_path),
-            original_filename=filename,
-            file_size_bytes=file_size,
-            sort_order=len(saved),
-        )
-        db.add(item)
-        saved.append(item)
+    try:
+        for file in files:
+            filename = file.filename or "unknown"
+            raw_size = getattr(file, "size", 0)
+            file_size = raw_size if isinstance(raw_size, int) and raw_size >= 0 else 0
+            await file.seek(0)
 
-    await db.flush()
+            file_type = _classify_doc_file(filename)
+
+            existing = (await db.execute(
+                select(DocumentFile).where(
+                    DocumentFile.document_id == document_id,
+                    DocumentFile.original_filename == filename,
+                ).limit(1)
+            )).scalar_one_or_none()
+
+            if existing:
+                saved.append(existing)
+                continue
+
+            ext = filename.rsplit(".", 1)[-1].lower()
+            if document_type == DocumentType.FAQ:
+                dest_path = f"documents/faqs/{uuid.uuid4().hex}.{ext}"
+            else:
+                dest_path = f"documents/{uuid.uuid4().hex}.{ext}"
+            ct = normalize_content_type(file.content_type)
+            await storage.save(
+                file,
+                dest_path,
+                content_type=ct or None,
+                content_disposition="attachment",
+            )
+            uploaded_paths.append(dest_path)
+
+            item = DocumentFile(
+                document_id=document_id,
+                file_type=file_type,
+                file_url=storage.get_url(dest_path),
+                original_filename=filename,
+                file_size_bytes=file_size,
+                sort_order=len(saved),
+            )
+            db.add(item)
+            saved.append(item)
+
+        await db.flush()
+    except Exception as exc:
+        for path in reversed(uploaded_paths):
+            try:
+                await storage.delete(path)
+            except Exception:
+                logger.warning("Failed to rollback uploaded file: %s", path, exc_info=True)
+
+        if isinstance(exc, HTTPException):
+            raise
+        logger.exception("Failed to upload document files for document %s", document_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Upload failed; no files were saved",
+        ) from exc
+
     logger.info("Uploaded %d files for document %s", len(saved), document_id)
     return saved
 

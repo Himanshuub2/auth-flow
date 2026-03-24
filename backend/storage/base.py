@@ -5,7 +5,14 @@ from fastapi import UploadFile
 
 class StorageBackend(ABC):
     @abstractmethod
-    async def save(self, file: UploadFile, destination: str) -> str:
+    async def save(
+        self,
+        file: UploadFile,
+        destination: str,
+        *,
+        content_type: str | None = None,
+        content_disposition: str | None = None,
+    ) -> str:
         """Save file and return its accessible URL/path."""
 
     @abstractmethod

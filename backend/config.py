@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = "postgresql+psycopg://eventuser:event@localhost:5432/eventdb"
+    DATABASE_URL: str = "postgresql+asyncpg://appuser:apppass@localhost:5432/appdb"
 
     MAX_IMAGE_SIZE_BYTES: int = 20 * 1024 * 1024
     MAX_VIDEO_SIZE_BYTES: int = 500 * 1024 * 1024

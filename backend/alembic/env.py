@@ -18,7 +18,11 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-sync_url = settings.DATABASE_URL.replace("+psycopg", "+psycopg2")
+sync_url = settings.DATABASE_URL
+if sync_url.startswith("postgresql+asyncpg://"):
+    sync_url = sync_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
+elif sync_url.startswith("postgresql+psycopg://"):
+    sync_url = sync_url.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
 
 
 def run_migrations_offline() -> None:
