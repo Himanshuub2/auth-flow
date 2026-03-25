@@ -1,5 +1,4 @@
 import logging
-from time import perf_counter, process_time
 
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import func, select
@@ -24,20 +23,8 @@ async def save_event(
     event_id: int | None = None,
     files: list[UploadFile] | None = None,
 ) -> Event:
-    wall_start = perf_counter()
-    cpu_start = process_time()
-    checkpoint = wall_start
-
-    def _step_ms() -> float:
-        nonlocal checkpoint
-        now = perf_counter()
-        elapsed = (now - checkpoint) * 1000
-        checkpoint = now
-        return elapsed
-
     validate_applicability_refs(payload.applicability_type, payload.applicability_refs)
     is_new = event_id is None
-    upload_step_ms = 0.0
 
     if is_new:
         event = Event(created_by=user_id)
@@ -67,9 +54,7 @@ async def save_event(
     uploaded_ids: list[int] = []
     uploaded_names: list[str] = []
     if files:
-        before_upload = perf_counter()
         uploaded = await upload_files(db, event.id, files, payload.file_metadata)
-        upload_step_ms = (perf_counter() - before_upload) * 1000
         uploaded_ids = [f.id for f in uploaded]
         uploaded_names = [f.original_filename for f in uploaded]
 
@@ -102,32 +87,8 @@ async def save_event(
         event.status = EventStatus.DRAFT
 
     await db.flush()
-    flush_ms = _step_ms()
     await db.refresh(event)
-    refresh_ms = _step_ms()
-    result = await get_event_with_relations(db, event.id)
-    relations_ms = _step_ms()
-
-    wall = perf_counter() - wall_start
-    cpu = process_time() - cpu_start
-    cpu_pct = (cpu / wall * 100.0) if wall > 0 else 0.0
-    logger.info(
-        "save_event benchmark event_id=%s is_new=%s payload_status=%s files=%d "
-        "upload_ms=%.1f flush_ms=%.1f refresh_ms=%.1f load_relations_ms=%.1f "
-        "wall_s=%.3f cpu_s=%.3f cpu_pct=%.1f",
-        event.id,
-        is_new,
-        payload.status.value,
-        len(files or []),
-        upload_step_ms,
-        flush_ms,
-        refresh_ms,
-        relations_ms,
-        wall,
-        cpu,
-        cpu_pct,
-    )
-    return result
+    return await get_event_with_relations(db, event.id)
 
 
 async def get_event(db: AsyncSession, event_id: int) -> Event:
