@@ -79,6 +79,7 @@ class AzureBlobStorageBackend(StorageBackend):
 
         self._client = BlobServiceClient.from_connection_string(
             settings.AZURE_STORAGE_CONNECTION_STRING,
+            logging_enable=False,
         )
         conn_parts = _parse_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
         self._account_name = conn_parts.get("AccountName")
@@ -131,6 +132,7 @@ class AzureBlobStorageBackend(StorageBackend):
                 overwrite=True,
                 max_concurrency=4,
                 content_settings=content_settings,
+                logging_enable=False,
             )
             logger.info("Azure blob saved: %s/%s", self._container_name, destination)
             return destination
@@ -145,7 +147,7 @@ class AzureBlobStorageBackend(StorageBackend):
         try:
             container = await self._get_container()
             blob = container.get_blob_client(path)
-            await blob.delete_blob()
+            await blob.delete_blob(logging_enable=False)
             logger.info("Azure blob deleted: %s/%s", self._container_name, path)
         except Exception:
             logger.warning("Azure blob delete failed: %s/%s", self._container_name, path, exc_info=True)

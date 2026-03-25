@@ -12,6 +12,7 @@ class FileMetadataIn(BaseModel):
     caption: str | None = None
     description: str | None = None
     thumbnail_original_filename: str | None = None
+    size: int | None = None
 
 
 class EventSavePayload(BaseModel):

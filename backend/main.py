@@ -18,6 +18,20 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
+# Keep Azure SDK request/response headers/body out of logs.
+for noisy_logger in (
+    "azure",
+    "azure.core",
+    "azure.core.pipeline",
+    "azure.core.pipeline.policies",
+    "azure.storage",
+    "azure.core.pipeline.policies.http_logging_policy",
+    "azure.storage.blob",
+):
+    lg = logging.getLogger(noisy_logger)
+    lg.setLevel(logging.CRITICAL + 1)
+    lg.propagate = False
+    lg.disabled = True
 logger = logging.getLogger(__name__)
 
 

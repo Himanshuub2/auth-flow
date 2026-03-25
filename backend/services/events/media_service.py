@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_VIDEO_MIME_TYPES = frozenset({"video/mp4", "application/mp4"})
 VIDEO_EXTENSION_TO_MIME_TYPES: dict[str, set[str]] = {"mp4": set(ALLOWED_VIDEO_MIME_TYPES)}
+MAX_EVENT_IMAGES = 50
+MAX_EVENT_VIDEOS = 8
+MAX_EVENT_THUMBNAILS = 8
+MAX_EVENT_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
+MAX_EVENT_VIDEO_SIZE_BYTES = 500 * 1024 * 1024
+MAX_THUMBNAIL_SIZE_BYTES = 300 * 1024
 
 
 def _classify_file(filename: str) -> FileType:
@@ -88,17 +94,29 @@ def _validate_event_mime_type(filename: str, content_type: str | None, file_type
         )
 
 
-def _validate_event_upload_size(file: UploadFile, filename: str, file_type: FileType) -> None:
-    """Enforce max size when UploadFile.size is set (multipart Content-Length)."""
-    limit = settings.MAX_IMAGE_SIZE_BYTES if file_type == FileType.IMAGE else settings.MAX_VIDEO_SIZE_BYTES
-    sz = getattr(file, "size", None)
-    if sz is None or not isinstance(sz, int) or sz < 0:
-        return
-    if sz > limit:
+def _validate_event_upload_size(size: int | None, filename: str, file_type: FileType, *, is_thumbnail: bool) -> int:
+    if size is None or not isinstance(size, int) or size < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing valid size for file '{filename}' in file_metadata",
+        )
+
+    if is_thumbnail:
+        limit = MAX_THUMBNAIL_SIZE_BYTES
+        limit_label = "300KB"
+    elif file_type == FileType.IMAGE:
+        limit = MAX_EVENT_IMAGE_SIZE_BYTES
+        limit_label = "10MB"
+    else:
+        limit = MAX_EVENT_VIDEO_SIZE_BYTES
+        limit_label = "500MB"
+
+    if size > limit:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File '{filename}' exceeds the {limit // (1024 * 1024)}MB limit",
+            detail=f"File '{filename}' exceeds the {limit_label} limit",
         )
+    return size
 
 
 def _event_magic_mimes_for_extension(ext: str, file_type: FileType) -> frozenset[str]:
@@ -119,6 +137,11 @@ async def upload_files(
         return []
 
     meta_by_name = {m.original_filename: m for m in (file_metadata or [])}
+    size_by_name = {
+        m.original_filename: m.size
+        for m in (file_metadata or [])
+        if m.original_filename
+    }
     thumbnail_filenames = {
         m.thumbnail_original_filename
         for m in (file_metadata or [])
@@ -129,9 +152,16 @@ async def upload_files(
     thumb_urls: dict[str, str] = {}
     uploaded_paths: list[str] = []
 
-    # Per file: extension/type → size → MIME → magic prefix (no upload until all pass).
+    image_count = 0
+    video_count = 0
+    thumbnail_count = 0
+
+    # Per file: extension/type -> size -> MIME -> magic prefix (no upload until all pass).
     for file in files:
         filename = file.filename or "unknown"
+        is_thumbnail = filename in thumbnail_filenames
+        metadata_size = size_by_name.get(filename)
+
         if filename in thumbnail_filenames:
             if not _is_thumbnail_extension(filename):
                 raise HTTPException(
@@ -139,14 +169,26 @@ async def upload_files(
                     detail=f"Thumbnail file '{filename}' must be an image",
                 )
             file_type = FileType.IMAGE
+            thumbnail_count += 1
         else:
             file_type = _classify_file(filename)
+            if file_type == FileType.IMAGE:
+                image_count += 1
+            else:
+                video_count += 1
 
         ext = filename.rsplit(".", 1)[-1].lower()
-        _validate_event_upload_size(file, filename, file_type)
+        _validate_event_upload_size(metadata_size, filename, file_type, is_thumbnail=is_thumbnail)
         _validate_event_mime_type(filename, file.content_type, file_type)
         prefix = await read_prefix_and_rewind(file)
         validate_magic_prefix(filename, prefix, _event_magic_mimes_for_extension(ext, file_type))
+
+    if image_count > MAX_EVENT_IMAGES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum 50 images allowed")
+    if video_count > MAX_EVENT_VIDEOS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum 8 videos allowed")
+    if thumbnail_count > MAX_EVENT_THUMBNAILS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum 8 thumbnails allowed")
 
     # Thumbnails first so thumb_urls is filled before main items that reference them.
     thumb_files = [f for f in files if (f.filename or "unknown") in thumbnail_filenames]
@@ -155,11 +197,18 @@ async def upload_files(
 
     saved: list[EventMediaItem] = []
     try:
+        existing_rows = await db.execute(
+            select(EventMediaItem).where(EventMediaItem.event_id == event_id)
+        )
+        existing_by_name = {
+            item.original_filename: item
+            for item in existing_rows.scalars().all()
+        }
+
         for file in upload_order:
             filename = file.filename or "unknown"
             ext = filename.rsplit(".", 1)[-1].lower()
             dest_path = f"{event_id}/{uuid.uuid4().hex}.{ext}"
-            await file.seek(0)
             ct = normalize_content_type(file.content_type)
             await storage.save(
                 file,
@@ -175,20 +224,14 @@ async def upload_files(
                 continue
 
             file_type = _classify_file(filename)
-            raw_size = getattr(file, "size", 0)
-            file_size = raw_size if isinstance(raw_size, int) and raw_size >= 0 else 0
+            file_size = size_by_name.get(filename) or 0
 
             meta = meta_by_name.get(filename)
             thumbnail_url = None
             if meta and meta.thumbnail_original_filename:
                 thumbnail_url = thumb_urls.get(meta.thumbnail_original_filename)
 
-            existing = (await db.execute(
-                select(EventMediaItem).where(
-                    EventMediaItem.event_id == event_id,
-                    EventMediaItem.original_filename == filename,
-                ).limit(1)
-            )).scalar_one_or_none()
+            existing = existing_by_name.get(filename)
 
             if existing:
                 if meta:
@@ -212,6 +255,7 @@ async def upload_files(
             )
             db.add(item)
             saved.append(item)
+            existing_by_name[filename] = item
 
         await db.flush()
     except Exception as exc:

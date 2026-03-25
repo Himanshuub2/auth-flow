@@ -1,4 +1,5 @@
 import logging
+from time import perf_counter, process_time
 
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import func, select
@@ -23,8 +24,20 @@ async def save_event(
     event_id: int | None = None,
     files: list[UploadFile] | None = None,
 ) -> Event:
+    wall_start = perf_counter()
+    cpu_start = process_time()
+    checkpoint = wall_start
+
+    def _step_ms() -> float:
+        nonlocal checkpoint
+        now = perf_counter()
+        elapsed = (now - checkpoint) * 1000
+        checkpoint = now
+        return elapsed
+
     validate_applicability_refs(payload.applicability_type, payload.applicability_refs)
     is_new = event_id is None
+    upload_step_ms = 0.0
 
     if is_new:
         event = Event(created_by=user_id)
@@ -54,7 +67,9 @@ async def save_event(
     uploaded_ids: list[int] = []
     uploaded_names: list[str] = []
     if files:
+        before_upload = perf_counter()
         uploaded = await upload_files(db, event.id, files, payload.file_metadata)
+        upload_step_ms = (perf_counter() - before_upload) * 1000
         uploaded_ids = [f.id for f in uploaded]
         uploaded_names = [f.original_filename for f in uploaded]
 
@@ -72,6 +87,13 @@ async def save_event(
         await _apply_file_metadata(db, event.id, payload.file_metadata)
 
     if payload.status == EventStatus.ACTIVE:
+        await _validate_active_event_name_uniqueness(
+            db,
+            event_name=event.event_name,
+            sub_event_name=event.sub_event_name,
+            exclude_id=event.id,
+            allow_replaced_active_id=event.replaces_document_id,
+        )
         if event.replaces_document_id is not None:
             event = await _publish_draft(db, event)
         else:
@@ -80,8 +102,32 @@ async def save_event(
         event.status = EventStatus.DRAFT
 
     await db.flush()
+    flush_ms = _step_ms()
     await db.refresh(event)
-    return await get_event_with_relations(db, event.id)
+    refresh_ms = _step_ms()
+    result = await get_event_with_relations(db, event.id)
+    relations_ms = _step_ms()
+
+    wall = perf_counter() - wall_start
+    cpu = process_time() - cpu_start
+    cpu_pct = (cpu / wall * 100.0) if wall > 0 else 0.0
+    logger.info(
+        "save_event benchmark event_id=%s is_new=%s payload_status=%s files=%d "
+        "upload_ms=%.1f flush_ms=%.1f refresh_ms=%.1f load_relations_ms=%.1f "
+        "wall_s=%.3f cpu_s=%.3f cpu_pct=%.1f",
+        event.id,
+        is_new,
+        payload.status.value,
+        len(files or []),
+        upload_step_ms,
+        flush_ms,
+        refresh_ms,
+        relations_ms,
+        wall,
+        cpu,
+        cpu_pct,
+    )
+    return result
 
 
 async def get_event(db: AsyncSession, event_id: int) -> Event:
@@ -256,6 +302,12 @@ async def toggle_event_status(
         event.deactivated_at = func.now()
         event.deactivated_by = deactivated_by
     elif event.status == EventStatus.INACTIVE:
+        await _validate_active_event_name_uniqueness(
+            db,
+            event_name=event.event_name,
+            sub_event_name=event.sub_event_name,
+            exclude_id=event.id,
+        )
         event.status = EventStatus.ACTIVE
         event.deactivate_remarks = None
         event.deactivated_at = None
@@ -556,3 +608,41 @@ async def _apply_file_metadata(
         item.caption = meta.caption
         item.description = meta.description
     logger.debug("Applied file_metadata for %d items on event %s", len(meta_by_name), event_id)
+
+
+async def _validate_active_event_name_uniqueness(
+    db: AsyncSession,
+    *,
+    event_name: str,
+    sub_event_name: str | None,
+    exclude_id: int | None = None,
+    allow_replaced_active_id: int | None = None,
+) -> None:
+    normalized_event_name = (event_name or "").strip().lower()
+    normalized_sub_event_name = (sub_event_name or "").strip().lower()
+    stmt = (
+        select(Event.id)
+        .where(
+            Event.status == EventStatus.ACTIVE,
+            func.lower(func.trim(Event.event_name)) == normalized_event_name,
+            func.lower(func.trim(func.coalesce(Event.sub_event_name, ""))) == normalized_sub_event_name,
+        )
+        .order_by(Event.id.asc())
+        .limit(1)
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Event.id != exclude_id)
+    if allow_replaced_active_id is not None:
+        stmt = stmt.where(Event.id != allow_replaced_active_id)
+
+    existing_id = (await db.execute(stmt)).scalar_one_or_none()
+    if existing_id is None:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            "Active event with same event_name and sub_event_name "
+            "already exists"
+        ),
+    )

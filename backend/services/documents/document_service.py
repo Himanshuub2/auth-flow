@@ -289,6 +289,12 @@ async def toggle_document_status(
         doc.deactivated_at = func.now()
         doc.deactivated_by = user.id if user else None
     elif doc.status == DocumentStatus.INACTIVE:
+        await _validate_active_document_name_uniqueness(
+            db,
+            name=doc.name,
+            document_type=doc.document_type,
+            exclude_id=doc.id,
+        )
         if doc.document_type in SINGLE_ACTIVE_DOCUMENT_TYPES:
             existing = await _get_active_singleton_document(db, doc.document_type, exclude_id=document_id)
             if existing:
@@ -765,6 +771,14 @@ async def _validate_document_save_request(
     if payload.status != DocumentStatus.ACTIVE:
         return
 
+    await _validate_active_document_name_uniqueness(
+        db,
+        name=payload.name,
+        document_type=payload.document_type,
+        exclude_id=None if is_new else existing_doc.id,
+        allow_replaced_active_id=existing_doc.replaces_document_id,
+    )
+
     if payload.document_type not in SINGLE_ACTIVE_DOCUMENT_TYPES:
         return
 
@@ -779,6 +793,43 @@ async def _validate_document_save_request(
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"Active {payload.document_type.value} already exists",
+    )
+
+
+async def _validate_active_document_name_uniqueness(
+    db: AsyncSession,
+    *,
+    name: str,
+    document_type: DocumentType,
+    exclude_id: int | None = None,
+    allow_replaced_active_id: int | None = None,
+) -> None:
+    normalized_name = (name or "").strip().lower()
+    stmt = (
+        select(Document.id)
+        .where(
+            Document.status == DocumentStatus.ACTIVE,
+            Document.document_type == document_type,
+            func.lower(func.trim(Document.name)) == normalized_name,
+        )
+        .order_by(Document.id.asc())
+        .limit(1)
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Document.id != exclude_id)
+    if allow_replaced_active_id is not None:
+        stmt = stmt.where(Document.id != allow_replaced_active_id)
+
+    existing_id = (await db.execute(stmt)).scalar_one_or_none()
+    if existing_id is None:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            f"Active document with name '{name}' already exists for "
+            f"type '{document_type.value}'"
+        ),
     )
 
 
