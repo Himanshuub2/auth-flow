@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cache import cache_delete, cache_get, cache_set
+from cache import cache_delete, cache_delete_prefix, cache_get, cache_set
 from config import settings
 from database import get_db
 from models.documents.document import Document, DocumentStatus, DocumentType, LABEL_TO_DOCUMENT_TYPE, document_type_to_label
@@ -18,6 +18,7 @@ from schemas.events.comman import APIResponse, APIResponsePaginated
 from pydantic import BaseModel
 
 from services.documents import document_service
+from utils import cache_keys
 from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user
 
@@ -83,7 +84,10 @@ async def create_document(
 ):
     payload = DocumentSavePayload.model_validate_json(data)
     doc = await document_service.save_document(db, user, payload, files=files or None)
-    await cache_delete(f"item:document:{doc.id}")
+    await cache_delete(cache_keys.document_item(doc.id))
+    await cache_delete_prefix("items:list:")
+    await cache_delete_prefix("doc_hub:")
+    await cache_delete("items:kpi")
     linked_details = None
     if doc.linked_document_ids:
         raw = await document_service.get_linked_document_details(db, doc.linked_document_ids)
@@ -101,9 +105,12 @@ async def update_document(
 ):
     payload = DocumentSavePayload.model_validate_json(data)
     doc = await document_service.save_document(db, user, payload, document_id=document_id, files=files or None)
-    await cache_delete(f"item:document:{document_id}")
+    await cache_delete(cache_keys.document_item(document_id))
     if doc.id != document_id:
-        await cache_delete(f"item:document:{doc.id}")
+        await cache_delete(cache_keys.document_item(doc.id))
+    await cache_delete_prefix("items:list:")
+    await cache_delete_prefix("doc_hub:")
+    await cache_delete("items:kpi")
     linked_details = None
     if doc.linked_document_ids:
         raw = await document_service.get_linked_document_details(db, doc.linked_document_ids)
@@ -155,7 +162,16 @@ async def document_hub(
     load_more_type = document_type.strip() if document_type else None
     load_more_page = page if load_more_type else None
 
-    cache_key = f"doc_hub:{user.id}:{doc_types}:{page}:{page_size}:{load_more_type}:{load_more_page}:{applicability}:{search}"
+    cache_key = cache_keys.doc_hub(
+        user=user,
+        doc_types=doc_types,
+        page=page,
+        page_size=page_size,
+        load_more_type=load_more_type,
+        load_more_page=load_more_page,
+        applicability=applicability,
+        search=search,
+    )
     cached = await cache_get(cache_key)
     if cached is not None:
         return APIResponse(
@@ -223,7 +239,10 @@ async def toggle_status(
 ):
     remarks = payload.deactivate_remarks if payload else None
     doc = await document_service.toggle_document_status(db, document_id, user, deactivate_remarks=remarks)
-    await cache_delete(f"item:document:{document_id}")
+    await cache_delete(cache_keys.document_item(document_id))
+    await cache_delete_prefix("items:list:")
+    await cache_delete_prefix("doc_hub:")
+    await cache_delete("items:kpi")
     return APIResponse(message="Status updated", status_code=200, status="success", data=_to_out(doc))
 
 

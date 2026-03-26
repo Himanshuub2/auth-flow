@@ -15,15 +15,13 @@ _redis_unavailable = False
 
 
 async def get_redis() -> aioredis.Redis:
-    return None
     global _pool, _redis_unavailable
     if _redis_unavailable:
         raise RuntimeError("Redis disabled for current process")
     if _pool is None:
-        _pool = aioredis.from_url(
-            settings.REDIS_URL,
-            decode_responses=True,
-        )
+        if not settings.REDIS_URL:
+            raise RuntimeError("REDIS_URL is not configured")
+        _pool = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     return _pool
 
 
@@ -46,6 +44,8 @@ async def close_redis() -> None:
 
 
 async def cache_get(key: str) -> Any | None:
+    if not settings.REDIS_URL:
+        return None
     try:
         r = await get_redis()
         raw = await r.get(key)
@@ -58,6 +58,8 @@ async def cache_get(key: str) -> Any | None:
 
 
 async def cache_set(key: str, value: Any, ttl: int | None = None) -> None:
+    if not settings.REDIS_URL:
+        return
     try:
         r = await get_redis()
         await r.set(key, json.dumps(value), ex=ttl or settings.CACHE_TTL_SECONDS)
@@ -67,9 +69,33 @@ async def cache_set(key: str, value: Any, ttl: int | None = None) -> None:
 
 
 async def cache_delete(key: str) -> None:
+    if not settings.REDIS_URL:
+        return
     try:
         r = await get_redis()
         await r.delete(key)
     except Exception as exc:
         _disable_redis(exc)
         logger.warning("Redis DELETE failed for key=%s", key)
+
+
+async def cache_delete_prefix(prefix: str) -> None:
+    """
+    Delete all cache keys that start with a prefix.
+    Use this after writes to avoid stale list/search caches.
+    """
+    if not settings.REDIS_URL:
+        return
+    try:
+        r = await get_redis()
+        cursor = 0
+        pattern = f"{prefix}*"
+        while True:
+            cursor, keys = await r.scan(cursor=cursor, match=pattern, count=200)
+            if keys:
+                await r.delete(*keys)
+            if cursor == 0:
+                break
+    except Exception as exc:
+        _disable_redis(exc)
+        logger.warning("Redis DELETE PREFIX failed for prefix=%s", prefix)

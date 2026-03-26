@@ -9,6 +9,8 @@ python-jose[cryptography]==3.5.0
 python-multipart==0.0.20
 redis==5.2.1
 azure-storage-blob==12.24.1
+azure-identity
+azure-keyvault-secrets
 filetype
 
 # Testing

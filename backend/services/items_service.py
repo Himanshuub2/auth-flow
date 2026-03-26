@@ -37,6 +37,7 @@ from schemas.events.event_revision import RevisionDetailOut
 from schemas.events.event_media import MediaItemOut
 from services.documents import document_service
 from services.events import event_service, revision_service
+from utils import cache_keys
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,10 @@ async def get_items_kpi(db: AsyncSession) -> ItemsKpiOut:
     - overdue: next_review_date < today
     - due_for_review: next_review_date >= today
     """
+    cached = await cache_get("items:kpi")
+    if cached is not None:
+        return ItemsKpiOut.model_validate(cached)
+
     today = date.today()
 
     _status = lambda s: getattr(s, "value", s)
@@ -237,7 +242,7 @@ async def get_items_kpi(db: AsyncSession) -> ItemsKpiOut:
         else:
             event_inactive += c
 
-    return ItemsKpiOut(
+    result = ItemsKpiOut(
         active_doc=doc_active + event_active,
         due_for_review=doc_due,
         overdue=doc_overdue,
@@ -247,6 +252,8 @@ async def get_items_kpi(db: AsyncSession) -> ItemsKpiOut:
             "Event": event_total,
         },
     )
+    await cache_set("items:kpi", result.model_dump(mode="json"), ttl=ITEM_DETAIL_CACHE_TTL)
+    return result
 
 
 async def list_combined_filtered(
@@ -270,6 +277,23 @@ async def list_combined_filtered(
     statuses: filter by status (DRAFT, ACTIVE, INACTIVE).
     search: ILIKE on document/event name (applied in same API).
     """
+    cache_key = cache_keys.items_list(
+        page=page,
+        page_size=page_size,
+        item_type=item_type,
+        document_types=document_types,
+        document_names=document_names,
+        statuses=statuses,
+        last_updated_start=last_updated_start,
+        last_updated_end=last_updated_end,
+        next_review_start=next_review_start,
+        next_review_end=next_review_end,
+        search=search,
+    )
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return [CombinedItemOut.model_validate(item) for item in cached["data"]], cached["total"]
+
     doc_enum_list, include_events = _resolve_document_types(document_types)
 
     event_q = (
@@ -394,6 +418,14 @@ async def list_combined_filtered(
         )
         for r in rows
     ]
+    await cache_set(
+        cache_key,
+        {
+            "total": total,
+            "data": [item.model_dump(mode="json") for item in data],
+        },
+        ttl=ITEM_DETAIL_CACHE_TTL,
+    )
     return data, total
 
 
@@ -403,7 +435,7 @@ async def get_item_detail(
     item_type: str,
 ) -> EventOut | DocumentOut:
     """Load full detail for one event or document. Uses Redis cache with short TTL."""
-    cache_key = f"item:{item_type}:{item_id}"
+    cache_key = cache_keys.item_detail(item_type, item_id)
     cached = await cache_get(cache_key)
     if cached is not None:
         logger.debug("get_item_detail cache hit key=%s", cache_key)

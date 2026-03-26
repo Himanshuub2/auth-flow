@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cache import cache_get, cache_set
+from config import settings
 from database import get_db
 from models.documents.document import DOCUMENT_TYPE_LABELS
 from models.documents.legislation import Legislation, SubLegislation
@@ -21,6 +22,7 @@ from services.documents.document_service import get_allowed_types_for_user
 from utils.security import CurrentUser, get_current_user
 
 router = APIRouter()
+REFERENCE_CACHE_TTL = getattr(settings, "CACHE_TTL_SECONDS", 86400) * 2
 
 
 @router.get("/references", response_model=APIResponse)
@@ -43,7 +45,7 @@ async def get_document_references(
         result = await db.execute(select(Legislation).order_by(Legislation.name))
         legislation_rows = list(result.scalars().all())
         legislation = [LegislationOut.model_validate(r) for r in legislation_rows]
-        await cache_set("legislation", [l.model_dump() for l in legislation])
+        await cache_set("legislation", [l.model_dump() for l in legislation], ttl=REFERENCE_CACHE_TTL)
 
     # All sub-legislation (cached)
     cached_sub_leg = await cache_get("sub_legislation_all")
@@ -55,9 +57,8 @@ async def get_document_references(
         )
         sub_leg_rows = list(result.scalars().all())
         sub_legislation = [SubLegislationOut.model_validate(r) for r in sub_leg_rows]
-        await cache_set("sub_legislation_all", [s.model_dump() for s in sub_legislation])
+        await cache_set("sub_legislation_all", [s.model_dump() for s in sub_legislation], ttl=REFERENCE_CACHE_TTL)
 
-    # Divisions (hardcoded for now)
     divisions = [
         DivisionOut(id=1, name="Corporate"),
         DivisionOut(id=2, name="Marketing & Sales"),
@@ -65,7 +66,6 @@ async def get_document_references(
         DivisionOut(id=4, name="Finance"),
     ]
 
-    # Designations (hardcoded for now)
     designations = [
         DesignationOut(id=1, name="Administrator"),
         DesignationOut(id=2, name="DVM"),

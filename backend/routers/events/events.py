@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Body, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cache import cache_delete
+from cache import cache_delete, cache_delete_prefix, cache_get, cache_set
+from config import settings
 from database import get_db
 from models.events.event import Event, EventStatus
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from schemas.events.event import EventOut, EventSavePayload
 from services.events import event_service
+from utils import cache_keys
 from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user
 from pydantic import BaseModel
@@ -19,6 +21,7 @@ class ToggleEventPayload(BaseModel):
 
 
 router = APIRouter()
+EVENT_LIST_CACHE_TTL = getattr(settings, "ITEM_DETAIL_CACHE_TTL_SECONDS", 300)
 
 
 def _to_out(event: Event) -> EventOut:
@@ -63,7 +66,10 @@ async def create_event(
 ):
     payload = EventSavePayload.model_validate_json(data)
     event = await event_service.save_event(db, user.id, payload, files=files or None)
-    await cache_delete(f"item:event:{event.id}")
+    await cache_delete(cache_keys.event_item(event.id))
+    await cache_delete_prefix("events:list:")
+    await cache_delete_prefix("items:list:")
+    await cache_delete("items:kpi")
     return APIResponse(message="Event created", status_code=201, status="success", data=_to_out(event))
 
 
@@ -77,9 +83,12 @@ async def update_event(
 ):
     payload = EventSavePayload.model_validate_json(data)
     event = await event_service.save_event(db, user.id, payload, event_id=event_id, files=files or None)
-    await cache_delete(f"item:event:{event_id}")
+    await cache_delete(cache_keys.event_item(event_id))
     if event.id != event_id:
-        await cache_delete(f"item:event:{event.id}")
+        await cache_delete(cache_keys.event_item(event.id))
+    await cache_delete_prefix("events:list:")
+    await cache_delete_prefix("items:list:")
+    await cache_delete("items:kpi")
     return APIResponse(message="Event updated", status_code=200, status="success", data=_to_out(event))
 
 
@@ -91,8 +100,13 @@ async def list_events(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    cache_key = cache_keys.event_list(page, page_size, status.value if status else None)
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return APIResponsePaginated(**cached)
+
     events, total = await event_service.list_events(db, page, page_size, status)
-    return APIResponsePaginated(
+    response = APIResponsePaginated(
         message="Events fetched",
         status_code=200,
         status="success",
@@ -101,6 +115,8 @@ async def list_events(
         page=page,
         page_size=page_size,
     )
+    await cache_set(cache_key, response.model_dump(mode="json"), ttl=EVENT_LIST_CACHE_TTL)
+    return response
 
 
 @router.get("/{event_id}", response_model=APIResponse)
@@ -109,8 +125,15 @@ async def get_event(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
+    cache_key = cache_keys.event_item(event_id)
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return APIResponse(message="Event fetched", status_code=200, status="success", data=cached)
+
     event = await event_service.get_event_with_relations(db, event_id)
-    return APIResponse(message="Event fetched", status_code=200, status="success", data=_to_out(event))
+    out = _to_out(event)
+    await cache_set(cache_key, out.model_dump(mode="json"), ttl=EVENT_LIST_CACHE_TTL)
+    return APIResponse(message="Event fetched", status_code=200, status="success", data=out)
 
 
 @router.patch("/{event_id}/toggle-status", response_model=APIResponse)
@@ -122,5 +145,8 @@ async def toggle_event_status(
 ):
     remarks = payload.deactivate_remarks if payload else None
     event = await event_service.toggle_event_status(db, event_id, user.id, deactivate_remarks=remarks)
-    await cache_delete(f"item:event:{event_id}")
+    await cache_delete(cache_keys.event_item(event_id))
+    await cache_delete_prefix("events:list:")
+    await cache_delete_prefix("items:list:")
+    await cache_delete("items:kpi")
     return APIResponse(message="Status updated", status_code=200, status="success", data=_to_out(event))
