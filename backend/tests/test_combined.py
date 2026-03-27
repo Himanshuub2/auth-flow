@@ -203,3 +203,15 @@ def test_list_combined_missing_item_type_ok(client: TestClient) -> None:
     """List without item_type returns both events and documents."""
     resp = client.post("/api/items/", json={"page": 1, "page_size": 5})
     assert resp.status_code == 200
+
+
+def test_list_combined_page_size_too_large(client: TestClient) -> None:
+    """Page size above allowed limit returns validation error."""
+    resp = client.post("/api/items/", json={"page": 1, "page_size": 101})
+    assert resp.status_code == 422
+
+
+def test_list_combined_page_zero_invalid(client: TestClient) -> None:
+    """Page less than 1 returns validation error."""
+    resp = client.post("/api/items/", json={"page": 0, "page_size": 10})
+    assert resp.status_code == 422

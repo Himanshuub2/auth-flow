@@ -25,6 +25,10 @@ from utils.security import CurrentUser, get_current_user
 router = APIRouter()
 
 
+def _minimal_document_data(doc: Document) -> dict[str, int | str]:
+    return {"id": doc.id, "name": doc.name}
+
+
 class ToggleDocumentPayload(BaseModel):
     """Required when deactivating (ACTIVE -> INACTIVE). Optional when reactivating."""
 
@@ -71,10 +75,6 @@ def _to_list_out(doc: Document) -> DocumentOut:
     )
 
 
-def _linked_details_for_doc(doc: Document, linked_raw: list) -> list[LinkedDocumentDetail]:
-    return [LinkedDocumentDetail(**r) for r in linked_raw]
-
-
 @router.post("/", response_model=APIResponse, status_code=201)
 async def create_document(
     data: str = Form(...),
@@ -88,11 +88,7 @@ async def create_document(
     await cache_delete_prefix("items:list:")
     await cache_delete_prefix("doc_hub:")
     await cache_delete("items:kpi")
-    linked_details = None
-    if doc.linked_document_ids:
-        raw = await document_service.get_linked_document_details(db, doc.linked_document_ids)
-        linked_details = _linked_details_for_doc(doc, raw)
-    return APIResponse(message="Document created", status_code=201, status="success", data=_to_out(doc, linked_details))
+    return APIResponse(message="Document created", status_code=201, status="success", data=_minimal_document_data(doc))
 
 
 @router.put("/{document_id}", response_model=APIResponse)
@@ -111,11 +107,7 @@ async def update_document(
     await cache_delete_prefix("items:list:")
     await cache_delete_prefix("doc_hub:")
     await cache_delete("items:kpi")
-    linked_details = None
-    if doc.linked_document_ids:
-        raw = await document_service.get_linked_document_details(db, doc.linked_document_ids)
-        linked_details = _linked_details_for_doc(doc, raw)
-    return APIResponse(message="Document updated", status_code=200, status="success", data=_to_out(doc, linked_details))
+    return APIResponse(message="Document updated", status_code=200, status="success", data=_minimal_document_data(doc))
 
 
 @router.get("/", response_model=APIResponsePaginated)
@@ -243,7 +235,7 @@ async def toggle_status(
     await cache_delete_prefix("items:list:")
     await cache_delete_prefix("doc_hub:")
     await cache_delete("items:kpi")
-    return APIResponse(message="Status updated", status_code=200, status="success", data=_to_out(doc))
+    return APIResponse(message="Status updated", status_code=200, status="success", data=_minimal_document_data(doc))
 
 
 @router.get("/{document_id}/revisions/", response_model=APIResponse)

@@ -24,6 +24,10 @@ router = APIRouter()
 EVENT_LIST_CACHE_TTL = getattr(settings, "ITEM_DETAIL_CACHE_TTL_SECONDS", 300)
 
 
+def _minimal_event_data(event: Event) -> dict[str, int | str]:
+    return {"id": event.id, "name": event.event_name}
+
+
 def _to_out(event: Event) -> EventOut:
     from services.events.event_service import build_event_out
     return build_event_out(event)
@@ -70,7 +74,7 @@ async def create_event(
     await cache_delete_prefix("events:list:")
     await cache_delete_prefix("items:list:")
     await cache_delete("items:kpi")
-    return APIResponse(message="Event created", status_code=201, status="success", data=_to_out(event))
+    return APIResponse(message="Event created", status_code=201, status="success", data=_minimal_event_data(event))
 
 
 @router.put("/{event_id}", response_model=APIResponse)
@@ -89,7 +93,7 @@ async def update_event(
     await cache_delete_prefix("events:list:")
     await cache_delete_prefix("items:list:")
     await cache_delete("items:kpi")
-    return APIResponse(message="Event updated", status_code=200, status="success", data=_to_out(event))
+    return APIResponse(message="Event updated", status_code=200, status="success", data=_minimal_event_data(event))
 
 
 @router.get("/", response_model=APIResponsePaginated)
@@ -149,4 +153,4 @@ async def toggle_event_status(
     await cache_delete_prefix("events:list:")
     await cache_delete_prefix("items:list:")
     await cache_delete("items:kpi")
-    return APIResponse(message="Status updated", status_code=200, status="success", data=_to_out(event))
+    return APIResponse(message="Status updated", status_code=200, status="success", data=_minimal_event_data(event))

@@ -1,5 +1,7 @@
 """Shared fixtures for API tests. Uses hardcoded CurrentUser (no DB auth)."""
 
+import asyncio
+import sys
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -7,6 +9,10 @@ import pytest_asyncio
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Psycopg async on Windows requires selector event loop.
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from database import async_session_factory, engine
 from main import app
