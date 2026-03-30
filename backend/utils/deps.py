@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 import logging
 
 import httpx
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt as jose_jwt
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,7 @@ from models.events.user import User as DbUser
 GRAPH_ME_URL = "https://graph.microsoft.com/v1.0/me"
 
 logger = logging.getLogger(__name__)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 @dataclass
@@ -54,22 +56,16 @@ def is_token_expired(token: str) -> bool:
     return exp_dt <= datetime.now(timezone.utc)
 
 
-def _extract_bearer_token(request: Request) -> str:
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
+def _extract_bearer_token(
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str:
+    if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization header",
         )
 
-    prefix = "Bearer "
-    if not auth_header.startswith(prefix):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization header format",
-        )
-
-    token = auth_header[len(prefix) :].strip()
+    token = (credentials.credentials or "").strip()
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -103,8 +99,10 @@ async def get_email_from_graph(token: str) -> str:
     return str(email).lower()
 
 
-async def authenticate(request: Request) -> str:
-    token = _extract_bearer_token(request)
+async def authenticate(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> str:
+    token = _extract_bearer_token(credentials)
     if is_token_expired(token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -114,10 +112,10 @@ async def authenticate(request: Request) -> str:
 
 
 async def get_current_user(
-    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> CurrentUser:
-    email = await authenticate(request)
+    email = await authenticate(credentials)
 
     user_q = select(DbUser).where(func.lower(DbUser.email) == email)
     row = (await db.execute(user_q)).scalar_one_or_none()
