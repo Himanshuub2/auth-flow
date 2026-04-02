@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 
 import httpx
@@ -37,23 +37,26 @@ class CurrentUser:
 def is_token_expired(token: str) -> bool:
     """
     Best-effort expiration check from JWT `exp` claim.
-    If token is not a JWT or missing `exp`, treat it as expired/invalid.
+    If token cannot be parsed, let Microsoft Graph be the source of truth.
     """
+    # Small leeway to avoid false "expired" around boundary/clock skew.
+    leeway_seconds = 60
+
     try:
         claims = jose_jwt.get_unverified_claims(token)
     except Exception:
-        return True
+        return False
 
     exp = claims.get("exp")
     if exp is None:
-        return True
+        return False
 
     try:
         exp_dt = datetime.fromtimestamp(float(exp), tz=timezone.utc)
     except Exception:
-        return True
+        return False
 
-    return exp_dt <= datetime.now(timezone.utc)
+    return exp_dt <= datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=leeway_seconds)
 
 
 def _extract_bearer_token(

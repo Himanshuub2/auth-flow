@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from services.documents import document_service
 from utils import cache_keys
 from utils.dates import format_date_dmy_month_abbr
-from utils.security import CurrentUser, get_current_user
+from utils.security import CurrentUser, get_current_user, is_active_master_or_policy_or_kh_admin
 
 router = APIRouter()
 
@@ -80,7 +80,7 @@ async def create_document(
     data: str = Form(...),
     files: list[UploadFile] = File(default=[]),
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
 ):
     payload = DocumentSavePayload.model_validate_json(data)
     doc = await document_service.save_document(db, user, payload, files=files or None)
