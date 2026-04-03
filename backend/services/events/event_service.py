@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import HTTPException, UploadFile, status
+from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,7 +9,7 @@ from models.events.event import Event, EventRevision, EventStatus
 from models.events.event_media_item import EventMediaItem
 from models.events.user import User
 from schemas.events.event import EventOut, EventSavePayload, FileMetadataIn, MediaFileSummary
-from services.events.media_service import upload_files
+from storage import get_storage
 from utils.applicability import validate_applicability_refs
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,6 @@ async def save_event(
     payload: EventSavePayload,
     *,
     event_id: int | None = None,
-    files: list[UploadFile] | None = None,
 ) -> Event:
     validate_applicability_refs(payload.applicability_type, payload.applicability_refs)
     is_new = event_id is None
@@ -51,25 +50,8 @@ async def save_event(
     event.applicability_refs = payload.applicability_refs
     event.change_remarks = payload.change_remarks
 
-    uploaded_ids: list[int] = []
-    uploaded_names: list[str] = []
-    if files:
-        uploaded = await upload_files(db, event.id, files, payload.file_metadata)
-        uploaded_ids = [f.id for f in uploaded]
-        uploaded_names = [f.original_filename for f in uploaded]
-
-    if payload.selected_filenames is not None:
-        all_names = list(dict.fromkeys([*payload.selected_filenames, *uploaded_names]))
-        await _sync_staging(db, event, all_names)
-    elif uploaded_ids:
-        existing_staging = list(event.staging_file_ids or [])
-        for fid in uploaded_ids:
-            if fid not in existing_staging:
-                existing_staging.append(fid)
-        event.staging_file_ids = existing_staging
-
-    if payload.file_metadata:
-        await _apply_file_metadata(db, event.id, payload.file_metadata)
+    if payload.file_metadata is not None:
+        await _sync_media_from_metadata(db, event, payload.file_metadata)
 
     if payload.status == EventStatus.ACTIVE:
         await _validate_active_event_name_uniqueness(
@@ -123,6 +105,23 @@ def _compute_media_versions(file_id: int, event: Event) -> list[int]:
     return sorted(set(versions))
 
 
+def _build_media_summary(f: EventMediaItem, event: Event) -> MediaFileSummary:
+    """Build a MediaFileSummary with fresh read SAS URLs from stored blob paths."""
+    storage = get_storage()
+    return MediaFileSummary(
+        id=f.id,
+        file_url=storage.get_read_url(f.file_url),
+        blob_path=f.file_url,
+        original_filename=f.original_filename,
+        media_versions=_compute_media_versions(f.id, event),
+        file_type=f.file_type,
+        thumbnail_url=storage.get_read_url(f.thumbnail_url) if f.thumbnail_url else None,
+        thumbnail_blob_path=f.thumbnail_url,
+        caption=f.caption,
+        description=f.description,
+    )
+
+
 async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> EventOut:
     """Item detail: full Event + User.username only; media filtered by current version."""
     row = await db.execute(
@@ -141,19 +140,7 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
     file_by_id = {f.id: f for f in all_files}
     version_files = [file_by_id[fid] for fid in file_ids if fid in file_by_id]
 
-    files = [
-        MediaFileSummary(
-            id=f.id,
-            file_url=f.file_url,
-            original_filename=f.original_filename,
-            media_versions=_compute_media_versions(f.id, event),
-            file_type=f.file_type,
-            thumbnail_url=f.thumbnail_url,
-            caption=f.caption,
-            description=f.description,
-        )
-        for f in version_files
-    ]
+    files = [_build_media_summary(f, event) for f in version_files]
 
     return EventOut(
         id=event.id,
@@ -186,16 +173,7 @@ def build_event_out(event: Event) -> EventOut:
     target_file_ids = _get_file_ids_for_version_sync(event, target_ver)
     file_by_id = {m.id: m for m in event.media_items}
     files = [
-        MediaFileSummary(
-            id=m.id,
-            file_url=m.file_url,
-            original_filename=m.original_filename,
-            media_versions=_compute_media_versions(m.id, event),
-            file_type=m.file_type,
-            thumbnail_url=m.thumbnail_url,
-            caption=m.caption,
-            description=m.description,
-        )
+        _build_media_summary(m, event)
         for fid in target_file_ids
         if (m := file_by_id.get(fid)) is not None
     ]
@@ -537,38 +515,47 @@ async def _files_differ_between(
     return names_a != names_b
 
 
-async def _sync_staging(
-    db: AsyncSession, event: Event, selected_names: list[str]
+async def _sync_media_from_metadata(
+    db: AsyncSession, event: Event, file_metadata: list[FileMetadataIn]
 ) -> None:
-    """Make staging (staging_file_ids) match exactly what FE sent."""
-    desired = set(selected_names)
-    all_files = await _get_all_files(db, event.id)
-    name_to_file = {f.original_filename: f for f in all_files}
-    new_staging: list[int] = []
-    for name in selected_names:
-        f = name_to_file.get(name)
-        if f:
-            new_staging.append(f.id)
-    event.staging_file_ids = new_staging
+    """
+    Sync EventMediaItem rows from FE-provided file_metadata (blob paths).
+    - Creates new rows for new blob_paths.
+    - Updates caption/description/thumbnail on existing rows.
+    - Sets staging_file_ids to exactly match the metadata list order.
+    """
+    existing_files = await _get_all_files(db, event.id)
+    existing_by_path = {f.file_url: f for f in existing_files}
 
+    new_staging_ids: list[int] = []
 
-async def _apply_file_metadata(
-    db: AsyncSession, event_id: int, file_metadata: list[FileMetadataIn]
-) -> None:
-    """Update caption and description for existing media items."""
-    meta_by_name = {m.original_filename: m for m in file_metadata}
-    if not meta_by_name:
-        return
-    result = await db.execute(
-        select(EventMediaItem).where(EventMediaItem.event_id == event_id)
-    )
-    for item in result.scalars().all():
-        meta = meta_by_name.get(item.original_filename)
-        if not meta:
-            continue
-        item.caption = meta.caption
-        item.description = meta.description
-    logger.debug("Applied file_metadata for %d items on event %s", len(meta_by_name), event_id)
+    for idx, meta in enumerate(file_metadata):
+        existing = existing_by_path.get(meta.blob_path)
+        if existing:
+            existing.caption = meta.caption
+            existing.description = meta.description
+            existing.sort_order = meta.sort_order if meta.sort_order else idx
+            if meta.thumbnail_blob_path is not None:
+                existing.thumbnail_url = meta.thumbnail_blob_path
+            new_staging_ids.append(existing.id)
+        else:
+            item = EventMediaItem(
+                event_id=event.id,
+                file_type=meta.file_type,
+                file_url=meta.blob_path,
+                thumbnail_url=meta.thumbnail_blob_path,
+                caption=meta.caption,
+                description=meta.description,
+                sort_order=meta.sort_order if meta.sort_order else idx,
+                file_size_bytes=meta.file_size_bytes,
+                original_filename=meta.original_filename,
+            )
+            db.add(item)
+            await db.flush()
+            new_staging_ids.append(item.id)
+
+    event.staging_file_ids = new_staging_ids
+    logger.debug("Synced %d media items for event %s from metadata", len(file_metadata), event.id)
 
 
 async def _validate_active_event_name_uniqueness(
