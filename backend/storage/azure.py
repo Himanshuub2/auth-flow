@@ -174,17 +174,22 @@ class AzureBlobStorageBackend(StorageBackend):
             return path_or_url
         return self.get_url(path_or_url)
 
-    def get_url(self, path: str) -> str:
-        """
-        Return a SAS URL for the given blob path with a 10-minute expiry.
-        When bypass is enabled, returns a placeholder image URL for testing.
-        """
+    def _generate_sas_url(
+        self,
+        path: str,
+        *,
+        read: bool = False,
+        write: bool = False,
+        create: bool = False,
+        expiry_minutes: int = 10,
+    ) -> str:
+        """Generate a SAS URL for a blob with the specified permissions and expiry."""
         if self._bypass:
             return _fake_image_url(path)
+
         account_url = self._client.url
         base_url = f"{account_url}{self._container_name}/{path}"
 
-        # If we don't have the pieces needed to sign, return the plain URL.
         if not self._account_name or not self._account_key:
             logger.debug(
                 "Returning unsigned Azure blob URL for %s/%s; missing account credentials",
@@ -196,11 +201,10 @@ class AzureBlobStorageBackend(StorageBackend):
         try:
             from azure.storage.blob import generate_blob_sas  # type: ignore[attr-defined]
 
-            # Explicit start (1h ago) and expiry (10min from now) in naive UTC so Azure always sees start < expiry.
             now_utc = datetime.now(timezone.utc)
             start_naive = (now_utc - timedelta(hours=1)).replace(tzinfo=None)
-            expiry_naive = (now_utc + timedelta(minutes=10)).replace(tzinfo=None)
-            permissions = self._sas_permissions_cls(read=True)
+            expiry_naive = (now_utc + timedelta(minutes=expiry_minutes)).replace(tzinfo=None)
+            permissions = self._sas_permissions_cls(read=read, write=write, create=create)
 
             sas_token = generate_blob_sas(
                 account_name=self._account_name,
@@ -214,9 +218,12 @@ class AzureBlobStorageBackend(StorageBackend):
 
             signed_url = f"{base_url}?{sas_token}"
             logger.debug(
-                "Generated SAS URL for blob %s/%s with 10-minute expiry",
+                "Generated SAS URL for blob %s/%s (read=%s, write=%s, expiry=%dm)",
                 self._container_name,
                 path,
+                read,
+                write,
+                expiry_minutes,
             )
             return signed_url
         except Exception:
@@ -226,3 +233,58 @@ class AzureBlobStorageBackend(StorageBackend):
                 path,
             )
             return base_url
+
+    def get_url(self, path: str) -> str:
+        """Return a read SAS URL for the given blob path with a 10-minute expiry."""
+        return self._generate_sas_url(path, read=True, expiry_minutes=10)
+
+    def get_container_upload_sas(self, expiry_minutes: int = 120) -> tuple[str, str]:
+        """
+        Return (base_url, sas_token) for direct uploads from the browser.
+
+        base_url is `https://{account}.blob.core.windows.net/{container}/` (trailing slash).
+        sas_token is the query string without a leading ``?``. The FE builds the final URL as:
+        ``{base_url}{blob_path}?{sas_token}`` where blob_path is e.g. ``events/events-{slug}/file.jpg``.
+        """
+        if self._bypass:
+            base = f"https://fake.blob.core.windows.net/{self._container_name}/"
+            return base, "sv=bypass&sig=fake"
+
+        account_url = self._client.url
+        base_url = f"{account_url}{self._container_name}/"
+
+        if not self._account_name or not self._account_key:
+            logger.debug(
+                "Cannot sign container SAS for %s; returning base URL with empty token",
+                self._container_name,
+            )
+            return base_url, ""
+
+        try:
+            from azure.storage.blob import ContainerSasPermissions, generate_container_sas  # type: ignore[attr-defined]
+
+            now_utc = datetime.now(timezone.utc)
+            start_naive = (now_utc - timedelta(hours=1)).replace(tzinfo=None)
+            expiry_naive = (now_utc + timedelta(minutes=expiry_minutes)).replace(tzinfo=None)
+            permissions = ContainerSasPermissions(read=True, write=True, create=True)
+
+            sas_token = generate_container_sas(
+                account_name=self._account_name,
+                container_name=self._container_name,
+                account_key=self._account_key,
+                permission=permissions,
+                start=start_naive,
+                expiry=expiry_naive,
+            )
+            logger.debug(
+                "Generated container upload SAS for %s with %dm expiry",
+                self._container_name,
+                expiry_minutes,
+            )
+            return base_url, sas_token
+        except Exception:
+            logger.exception(
+                "Failed to generate container SAS for %s; returning unsigned base URL",
+                self._container_name,
+            )
+            return base_url, ""
