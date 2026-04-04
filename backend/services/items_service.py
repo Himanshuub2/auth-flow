@@ -37,6 +37,7 @@ from schemas.events.event_revision import RevisionDetailOut
 from schemas.events.event_media import MediaItemOut
 from services.documents import document_service
 from services.events import event_service, revision_service
+from storage import get_storage
 from utils import cache_keys
 
 logger = logging.getLogger(__name__)
@@ -536,6 +537,7 @@ async def get_item_revision_snapshot(
             created_by_name=revision.creator.username,
             created_at=revision.created_at,
         )
+        storage = get_storage()
         return RevisionDetailOut(
             revision=rev_out,
             media_items=[
@@ -544,8 +546,10 @@ async def get_item_revision_snapshot(
                     event_id=m.event_id,
                     media_versions=[media_version],
                     file_type=m.file_type,
-                    file_url=m.file_url,
-                    thumbnail_url=m.thumbnail_url,
+                    file_url=storage.get_read_url(m.file_url),
+                    blob_path=m.file_url,
+                    thumbnail_url=storage.get_read_url(m.thumbnail_url) if m.thumbnail_url else None,
+                    thumbnail_blob_path=m.thumbnail_url,
                     caption=m.caption,
                     description=m.description,
                     sort_order=m.sort_order,

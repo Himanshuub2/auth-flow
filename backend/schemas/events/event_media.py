@@ -11,7 +11,9 @@ class MediaItemOut(BaseModel):
     media_versions: list[int]
     file_type: FileType
     file_url: str
+    blob_path: str
     thumbnail_url: str | None
+    thumbnail_blob_path: str | None
     caption: str | None
     description: str | None
     sort_order: int

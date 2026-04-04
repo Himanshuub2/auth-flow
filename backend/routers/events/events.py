@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cache import cache_delete, cache_delete_prefix, cache_get, cache_set
@@ -6,8 +6,9 @@ from config import settings
 from database import get_db
 from models.events.event import Event, EventStatus
 from schemas.events.comman import APIResponse, APIResponsePaginated
-from schemas.events.event import EventOut, EventSavePayload
+from schemas.events.event import EventOut, EventSavePayload, UploadUrlRequest, UploadUrlResponse
 from services.events import event_service
+from services.events.upload_url_service import generate_upload_urls
 from utils import cache_keys
 from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user
@@ -61,15 +62,28 @@ def _to_list_out(event: Event) -> EventOut:
     )
 
 
-@router.post("/", response_model=APIResponse, status_code=201)
-async def create_event(
-    data: str = Form(...),
-    files: list[UploadFile] = File(default=[]),
+@router.post("/upload-url", response_model=APIResponse)
+async def get_upload_urls(
+    body: UploadUrlRequest,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    payload = EventSavePayload.model_validate_json(data)
-    event = await event_service.save_event(db, user.id, payload, files=files or None)
+    result = await generate_upload_urls(db, body)
+    return APIResponse(
+        message="Upload URLs generated",
+        status_code=200,
+        status="success",
+        data=result.model_dump(),
+    )
+
+
+@router.post("/", response_model=APIResponse, status_code=201)
+async def create_event(
+    payload: EventSavePayload,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    event = await event_service.save_event(db, user.id, payload)
     await cache_delete(cache_keys.event_item(event.id))
     await cache_delete_prefix("events:list:")
     await cache_delete_prefix("items:list:")
@@ -80,13 +94,11 @@ async def create_event(
 @router.put("/{event_id}", response_model=APIResponse)
 async def update_event(
     event_id: int,
-    data: str = Form(...),
-    files: list[UploadFile] = File(default=[]),
+    payload: EventSavePayload,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    payload = EventSavePayload.model_validate_json(data)
-    event = await event_service.save_event(db, user.id, payload, event_id=event_id, files=files or None)
+    event = await event_service.save_event(db, user.id, payload, event_id=event_id)
     await cache_delete(cache_keys.event_item(event_id))
     if event.id != event_id:
         await cache_delete(cache_keys.event_item(event.id))

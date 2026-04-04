@@ -61,11 +61,10 @@ def test_get_item_detail_event(client: TestClient) -> None:
         "applicability_type": "ALL",
         "applicability_refs": None,
         "status": EventStatus.DRAFT.value,
-        "selected_filenames": None,
         "file_metadata": None,
         "change_remarks": None,
     }
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
@@ -139,11 +138,10 @@ def test_item_revisions_event(client: TestClient) -> None:
         "applicability_type": "ALL",
         "applicability_refs": None,
         "status": EventStatus.DRAFT.value,
-        "selected_filenames": None,
         "file_metadata": None,
         "change_remarks": None,
     }
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 

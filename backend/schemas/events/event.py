@@ -7,12 +7,15 @@ from models.events.event_media_item import FileType
 
 
 class FileMetadataIn(BaseModel):
-    """Per-file caption, description, and optional thumbnail. Sent in `file_metadata` on PUT; only caption/description does not create a new revision."""
+    """Per-file metadata sent when saving an event. blob_path is the Azure path where FE uploaded the file."""
     original_filename: str
+    blob_path: str
+    file_type: FileType
+    file_size_bytes: int
     caption: str | None = None
     description: str | None = None
-    thumbnail_original_filename: str | None = None
-    size: int | None = None
+    thumbnail_blob_path: str | None = None
+    sort_order: int = 0
 
 
 class EventSavePayload(BaseModel):
@@ -24,9 +27,21 @@ class EventSavePayload(BaseModel):
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
     applicability_refs: dict | list | None = None
     status: EventStatus = EventStatus.DRAFT
-    selected_filenames: list[str] | None = None
     file_metadata: list[FileMetadataIn] | None = None
     change_remarks: str | None = None
+
+
+class UploadUrlRequest(BaseModel):
+    """Optional existing event id; omit or null when creating a new event."""
+    event_id: int | None = None
+
+
+class UploadUrlResponse(BaseModel):
+    """FE builds upload URL as: ``{base_url}{blob_path}?{sas_token}`` with ``blob_path`` like ``events/events-{slug}/file.jpg``."""
+    slug: str
+    base_path: str
+    base_url: str
+    sas_token: str
 
 
 class MediaFileSummary(BaseModel):
@@ -34,7 +49,9 @@ class MediaFileSummary(BaseModel):
     original_filename: str
     file_type: FileType
     file_url: str
+    blob_path: str
     thumbnail_url: str | None
+    thumbnail_blob_path: str | None
     caption: str | None
     description: str | None
     media_versions: list[int]

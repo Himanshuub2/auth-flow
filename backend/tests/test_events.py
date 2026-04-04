@@ -1,6 +1,5 @@
 """Tests for Events API: create, draft, revisions, version."""
 
-import json
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -26,7 +25,6 @@ def _event_payload(
         "applicability_type": "ALL",
         "applicability_refs": None,
         "status": status.value,
-        "selected_filenames": None,
         "file_metadata": None,
         "change_remarks": None,
     }
@@ -37,7 +35,7 @@ def _event_payload(
 def test_create_event_as_draft(client: TestClient) -> None:
     """Create event and save as draft."""
     payload = _event_payload(event_name="Draft Event 1", status=EventStatus.DRAFT)
-    resp = client.post("/api/events/", data={"data": json.dumps(payload)})
+    resp = client.post("/api/events/", json=payload)
     assert resp.status_code == 201
     body = resp.json()
     assert body["status"] == "success"
@@ -48,7 +46,7 @@ def test_create_event_as_draft(client: TestClient) -> None:
 def test_create_event_then_get(client: TestClient) -> None:
     """Create event and fetch it."""
     payload = _event_payload(event_name="Get Test Event")
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
@@ -66,7 +64,7 @@ def test_create_draft_from_event(client: TestClient) -> None:
         status=EventStatus.ACTIVE,
         change_remarks="Initial activation",
     )
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
@@ -115,7 +113,7 @@ def test_create_event_activate_and_verify_revision(client: TestClient) -> None:
         status=EventStatus.ACTIVE,
         change_remarks="Initial publish",
     )
-    resp = client.post("/api/events/", data={"data": json.dumps(payload)})
+    resp = client.post("/api/events/", json=payload)
     assert resp.status_code == 201
     event_id = resp.json()["data"]["id"]
 
@@ -151,7 +149,7 @@ def test_get_revision_via_combined(client: TestClient) -> None:
         status=EventStatus.ACTIVE,
         change_remarks="First publish",
     )
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
@@ -177,7 +175,7 @@ def test_get_revision_via_combined(client: TestClient) -> None:
 def test_get_revision_invalid_version(client: TestClient) -> None:
     """Get revision with invalid version returns 404."""
     payload = _event_payload(event_name="Event For Invalid Rev")
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
@@ -191,15 +189,12 @@ def test_get_revision_invalid_version(client: TestClient) -> None:
 def test_update_event(client: TestClient) -> None:
     """Update existing event."""
     payload = _event_payload(event_name="Original Name")
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
     update_payload = _event_payload(event_name="Updated Name")
-    resp = client.put(
-        f"/api/events/{event_id}",
-        data={"data": json.dumps(update_payload)},
-    )
+    resp = client.put(f"/api/events/{event_id}", json=update_payload)
     assert resp.status_code == 200
     assert resp.json()["data"]["name"] == "Updated Name"
     assert set(resp.json()["data"].keys()) == {"id", "name"}
@@ -208,10 +203,7 @@ def test_update_event(client: TestClient) -> None:
 def test_update_event_not_found(client: TestClient) -> None:
     """Update non-existent event returns 404."""
     payload = _event_payload(event_name="Any")
-    resp = client.put(
-        "/api/events/999999",
-        data={"data": json.dumps(payload)},
-    )
+    resp = client.put("/api/events/999999", json=payload)
     assert resp.status_code == 404
 
 
@@ -231,7 +223,7 @@ def test_toggle_event_status_returns_minimal_payload(client: TestClient) -> None
         status=EventStatus.ACTIVE,
         change_remarks="publish",
     )
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
@@ -253,7 +245,7 @@ def test_toggle_event_requires_deactivation_remarks(client: TestClient) -> None:
         status=EventStatus.ACTIVE,
         change_remarks="publish",
     )
-    create = client.post("/api/events/", data={"data": json.dumps(payload)})
+    create = client.post("/api/events/", json=payload)
     assert create.status_code == 201
     event_id = create.json()["data"]["id"]
 
