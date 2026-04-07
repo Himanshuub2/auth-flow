@@ -18,7 +18,7 @@ from models.documents.document import (
     ROLE_DOCUMENT_TYPES,
     document_type_to_label,
 )
-from models.documents.document_file import DocumentFile
+from models.documents.document_file import DocumentFile, DocumentFileType
 from models.events.user import User
 from utils.security import CurrentUser
 from schemas.documents.document import (
@@ -327,6 +327,8 @@ def home_by_type_preview(doc: Document) -> dict:
     files_sorted = sorted(doc.files or [], key=lambda f: f.sort_order)
     files_out: list[dict] = []
     for f in files_sorted:
+        if f.file_type != DocumentFileType.IMAGE:
+            continue
         files_out.append(
             {
                 "id": f.id,
