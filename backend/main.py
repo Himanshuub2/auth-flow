@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from cache import close_redis
+from routers import home as home_router
 from routers.documents import combined as doc_combined
 from routers.documents import documents as doc_router
 from routers.documents import reference as doc_reference
@@ -69,6 +70,7 @@ app.add_middleware(
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(home_router.router, prefix="/api/home", tags=["Home"])
 app.include_router(reference.router, prefix="/api/reference", tags=["Reference"])
 
 app.include_router(doc_combined.router, prefix="/api/items", tags=["Items"])
