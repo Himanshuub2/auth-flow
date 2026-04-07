@@ -247,6 +247,7 @@ async def list_documents(
     page_size: int = 20,
     status_filter: DocumentStatus | None = None,
     document_type_filter: DocumentType | None = None,
+    exclude_document_types: list[DocumentType] | None = None,
 ) -> tuple[list[Document], int]:
     query = select(Document)
     count_query = select(func.count()).select_from(Document)
@@ -258,6 +259,10 @@ async def list_documents(
     if document_type_filter:
         query = query.where(Document.document_type == document_type_filter)
         count_query = count_query.where(Document.document_type == document_type_filter)
+
+    if exclude_document_types:
+        query = query.where(Document.document_type.notin_(exclude_document_types))
+        count_query = count_query.where(Document.document_type.notin_(exclude_document_types))
 
     total = (await db.execute(count_query)).scalar() or 0
     query = (

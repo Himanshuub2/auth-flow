@@ -21,7 +21,10 @@ async def whats_new(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Latest updated active documents — id, name, document_type only."""
+    """Latest updated active documents — id, name, document_type only (no FAQ / Latest News)."""
+    # Types omitted from this feed (adjust here if needed).
+    skip_types = (DocumentType.FAQ, DocumentType.LATEST_NEWS_AND_ANNOUNCEMENTS)
+
     cache_key = f"doc:whats_new:{page}:{page_size}"
     cached = await cache_get(cache_key)
     if cached is not None:
@@ -36,7 +39,12 @@ async def whats_new(
         )
 
     docs, total = await document_service.list_documents(
-        db, page, page_size, status_filter=DocumentStatus.ACTIVE, document_type_filter=None
+        db,
+        page,
+        page_size,
+        status_filter=DocumentStatus.ACTIVE,
+        document_type_filter=None,
+        exclude_document_types=list(skip_types),
     )
     rows = [
         {
@@ -45,6 +53,7 @@ async def whats_new(
             "document_type": document_type_to_label(d.document_type.value),
         }
         for d in docs
+        if d.document_type not in skip_types
     ]
     payload = {"data": rows, "total": total, "page": page, "page_size": page_size}
     await cache_set(cache_key, payload, ttl=settings.ITEM_DETAIL_CACHE_TTL_SECONDS)
