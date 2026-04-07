@@ -165,6 +165,9 @@ class Document(BaseDocuments):
     created_by: Mapped[str] = mapped_column(
         String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id"), nullable=False,
     )
+    updated_by: Mapped[str | None] = mapped_column(
+        String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id", ondelete="SET NULL"), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),

@@ -12,6 +12,7 @@ azure-storage-blob==12.24.1
 azure-identity
 azure-keyvault-secrets
 filetype
+slowapi==0.1.9
 
 # Testing
 pytest==8.3.4

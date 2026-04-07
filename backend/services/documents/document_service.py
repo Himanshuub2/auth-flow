@@ -97,6 +97,7 @@ async def save_document(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="change_remarks is required when editing a document",
                 )
+        doc.updated_by = user.id
 
     if payload.linked_document_ids:
         await _validate_linked_ids(db, payload.linked_document_ids, doc.id)
@@ -387,6 +388,7 @@ async def toggle_document_status(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only ACTIVE/INACTIVE documents can be toggled",
         )
+    doc.updated_by = user.id if user else None
     await db.flush()
     await db.refresh(doc)
     return doc

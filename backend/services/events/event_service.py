@@ -31,6 +31,7 @@ async def save_event(
         await db.flush()
     else:
         event = await get_event(db, event_id)
+        event.updated_by = user_id
 
         if event.status == EventStatus.ACTIVE and payload.status == EventStatus.DRAFT:
             event = await _get_or_create_draft(db, event, user_id)
@@ -256,6 +257,7 @@ async def toggle_event_status(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only ACTIVE/INACTIVE events can be toggled",
         )
+    event.updated_by = deactivated_by
     await db.flush()
     await db.refresh(event)
     return event
