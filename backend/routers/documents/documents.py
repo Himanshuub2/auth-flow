@@ -4,7 +4,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cache import cache_delete, cache_delete_prefix, cache_get, cache_set
 from config import settings
 from database import get_db
-from models.documents.document import Document, DocumentStatus, DocumentType, LABEL_TO_DOCUMENT_TYPE, document_type_to_label
+from models.documents.document import (
+    Document,
+    DocumentStatus,
+    DocumentType,
+    LABEL_TO_DOCUMENT_TYPE,
+    document_type_to_label,
+)
 from schemas.documents.document import (
     DocumentHubOut,
     DocumentOut,
@@ -87,6 +93,8 @@ async def create_document(
     await cache_delete(cache_keys.document_item(doc.id))
     await cache_delete_prefix("items:list:")
     await cache_delete_prefix("doc_hub:")
+    await cache_delete_prefix("doc:whats_new:")
+    await cache_delete_prefix("doc:home_by_type:")
     await cache_delete("items:kpi")
     return APIResponse(message="Document created", status_code=201, status="success", data=_minimal_document_data(doc))
 
@@ -106,6 +114,8 @@ async def update_document(
         await cache_delete(cache_keys.document_item(doc.id))
     await cache_delete_prefix("items:list:")
     await cache_delete_prefix("doc_hub:")
+    await cache_delete_prefix("doc:whats_new:")
+    await cache_delete_prefix("doc:home_by_type:")
     await cache_delete("items:kpi")
     return APIResponse(message="Document updated", status_code=200, status="success", data=_minimal_document_data(doc))
 
@@ -208,6 +218,92 @@ async def linked_options(
     return APIResponse(message="Linked options fetched", status_code=200, status="success", data=data)
 
 
+@router.get("/whats-new", response_model=APIResponsePaginated)
+async def whats_new(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Latest updated active documents — id, name, document_type only."""
+    cache_key = f"doc:whats_new:{page}:{page_size}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return APIResponsePaginated(
+            message="What's new fetched",
+            status_code=200,
+            status="success",
+            data=cached["data"],
+            total=cached["total"],
+            page=cached["page"],
+            page_size=cached["page_size"],
+        )
+
+    docs, total = await document_service.list_documents(
+        db, page, page_size, status_filter=DocumentStatus.ACTIVE, document_type_filter=None
+    )
+    rows = [
+        {
+            "id": d.id,
+            "name": d.name,
+            "document_type": document_type_to_label(d.document_type.value),
+        }
+        for d in docs
+    ]
+    payload = {"data": rows, "total": total, "page": page, "page_size": page_size}
+    await cache_set(cache_key, payload, ttl=settings.ITEM_DETAIL_CACHE_TTL_SECONDS)
+    return APIResponsePaginated(
+        message="What's new fetched",
+        status_code=200,
+        status="success",
+        data=rows,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/by-type", response_model=APIResponse)
+async def documents_by_type_for_home(
+    document_type: str = Query(..., description="Label e.g. 'Latest News and Announcements' or enum value"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Active documents of one type: id, name, document_type, files (SAS URLs only). No creator load."""
+    doc_type_enum = LABEL_TO_DOCUMENT_TYPE.get((document_type or "").strip())
+    if doc_type_enum is None:
+        try:
+            doc_type_enum = DocumentType(document_type.strip())
+        except ValueError:
+            raise HTTPException(400, detail="Invalid document_type")
+
+    type_key = doc_type_enum.value
+    cache_key = f"doc:home_by_type:{type_key}:{page}:{page_size}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return APIResponse(
+            message="Documents fetched",
+            status_code=200,
+            status="success",
+            data=cached,
+        )
+
+    docs, _total = await document_service.list_active_documents_for_home(
+        db, doc_type_enum, page, page_size
+    )
+    out_list = [document_service.home_by_type_preview(d) for d in docs]
+
+    await cache_set(cache_key, out_list, ttl=settings.ITEM_DETAIL_CACHE_TTL_SECONDS)
+    return APIResponse(
+        message="Documents fetched",
+        status_code=200,
+        status="success",
+        data=out_list,
+    )
+
+
 @router.get("/{document_id}", response_model=APIResponse)
 async def get_document(
     document_id: int,
@@ -234,6 +330,8 @@ async def toggle_status(
     await cache_delete(cache_keys.document_item(document_id))
     await cache_delete_prefix("items:list:")
     await cache_delete_prefix("doc_hub:")
+    await cache_delete_prefix("doc:whats_new:")
+    await cache_delete_prefix("doc:home_by_type:")
     await cache_delete("items:kpi")
     return APIResponse(message="Status updated", status_code=200, status="success", data=_minimal_document_data(doc))
 

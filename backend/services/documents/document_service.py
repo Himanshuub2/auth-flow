@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import String as SAString, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import load_only, selectinload
 
 from models.documents.document import (
     ApplicabilityType,
@@ -34,6 +34,7 @@ from services.documents.document_file_service import (
     upload_document_files,
     validate_file_count,
 )
+from storage import get_storage
 from utils.applicability import validate_applicability_refs
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,74 @@ async def list_documents(
     )
     docs = list((await db.execute(query)).scalars().all())
     return docs, total
+
+
+async def list_active_documents_for_home(
+    db: AsyncSession,
+    document_type: DocumentType,
+    page: int,
+    page_size: int,
+) -> tuple[list[Document], int]:
+    """Active docs of one type with `Document.files` only (no creator, no revisions join)."""
+    filters = (
+        Document.document_type == document_type,
+        Document.status == DocumentStatus.ACTIVE,
+    )
+    count_query = select(func.count()).select_from(Document).where(*filters)
+    total = (await db.execute(count_query)).scalar() or 0
+    _home_doc_cols = (
+        Document.id,
+        Document.name,
+        Document.document_type,
+        Document.updated_at,
+    )
+    _home_file_cols = (
+        DocumentFile.id,
+        DocumentFile.document_id,
+        DocumentFile.file_type,
+        DocumentFile.file_url,
+        DocumentFile.original_filename,
+        DocumentFile.sort_order,
+    )
+    query = (
+        select(Document)
+        .where(*filters)
+        .options(
+            load_only(*_home_doc_cols),
+            selectinload(Document.files).options(load_only(*_home_file_cols)),
+        )
+        .order_by(Document.updated_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    docs = list((await db.execute(query)).scalars().all())
+    return docs, total
+
+
+def home_by_type_preview(doc: Document) -> dict:
+    """Minimal home/gallery payload: id, name, document_type, files with SAS URLs.
+
+    Uses rows in ``document_files`` for this document, ordered by ``sort_order``.
+    No revision table access — suitable for simple home galleries (e.g. Latest News).
+    """
+    storage = get_storage()
+    files_sorted = sorted(doc.files or [], key=lambda f: f.sort_order)
+    files_out: list[dict] = []
+    for f in files_sorted:
+        files_out.append(
+            {
+                "id": f.id,
+                "original_filename": f.original_filename,
+                "file_type": f.file_type.value,
+                "file_url": storage.get_read_url(f.file_url),
+            }
+        )
+    return {
+        "id": doc.id,
+        "name": doc.name,
+        "document_type": document_type_to_label(doc.document_type.value),
+        "files": files_out,
+    }
 
 
 async def toggle_document_status(
