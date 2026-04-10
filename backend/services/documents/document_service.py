@@ -662,6 +662,18 @@ async def get_document_hub(
 
     page_rows = (await db.execute(page_stmt)).all()
 
+    flyer_doc_ids = [r.id for r in page_rows if r.document_type == DocumentType.FLYER]
+    flyer_file_urls: dict[int, str] = {}
+    if flyer_doc_ids:
+        flyer_files = (await db.execute(
+            select(DocumentFile.document_id, DocumentFile.file_url)
+            .where(DocumentFile.document_id.in_(flyer_doc_ids))
+            .order_by(DocumentFile.document_id.asc(), DocumentFile.sort_order.asc(), DocumentFile.id.asc())
+        )).all()
+        for row in flyer_files:
+            if row.document_id not in flyer_file_urls:
+                flyer_file_urls[row.document_id] = row.file_url
+
     items_by_type: dict[DocumentType, list[DocumentHubItem]] = defaultdict(list)
     for r in page_rows:
         dt = r.document_type
@@ -670,6 +682,7 @@ async def get_document_hub(
                 id=r.id,
                 name=r.name,
                 isNew=r.created_at >= cutoff if r.created_at else False,
+                file_url=flyer_file_urls.get(r.id) if dt == DocumentType.FLYER else None,
             )
         )
 

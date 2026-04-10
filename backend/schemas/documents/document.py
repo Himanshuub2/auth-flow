@@ -158,6 +158,7 @@ class DocumentHubItem(BaseModel):
     id: int
     name: str
     isNew: bool = False
+    file_url: str | None = None
 
     model_config = {"from_attributes": True}
 
