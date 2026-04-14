@@ -1,18 +1,27 @@
 import logging
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from models.events.event import Event, EventRevision, EventStatus
 from models.events.event_media_item import EventMediaItem
 from models.events.user import User
-from schemas.events.event import EventOut, EventSavePayload, FileMetadataIn, MediaFileSummary
+from schemas.events.event import (
+    EventListItemOut,
+    EventOut,
+    EventPreviewMediaItem,
+    EventSavePayload,
+    FileMetadataIn,
+    MediaFileSummary,
+)
 from storage import get_storage
 from utils.applicability import validate_applicability_refs
 
 logger = logging.getLogger(__name__)
+
+PREVIEW_MEDIA_LIMIT = 6
 
 
 async def save_event(
@@ -143,6 +152,7 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
 
     files = [_build_media_summary(f, event) for f in version_files]
 
+    lc = int(getattr(event, "like_count", 0) or 0)
     return EventOut(
         id=event.id,
         event_name=event.event_name,
@@ -152,6 +162,7 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         tags=event.tags,
         current_media_version=ver,
         current_revision_number=event.current_revision_number,
+        version_display=f"{ver}.{event.current_revision_number}",
         status=event.status,
         applicability_type=event.applicability_type,
         applicability_refs=event.applicability_refs,
@@ -163,11 +174,13 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         change_remarks=event.change_remarks,
         deactivate_remarks=event.deactivate_remarks,
         deactivated_at=event.deactivated_at,
+        like_count=lc,
+        liked_by_me=False,
         files=files,
     )
 
 
-def build_event_out(event: Event) -> EventOut:
+def build_event_out(event: Event, *, liked_by_me: bool = False) -> EventOut:
     """Build EventOut from loaded Event (with media_items and creator)."""
     ver = event.current_media_version
     target_ver = ver if ver > 0 else 0
@@ -178,6 +191,7 @@ def build_event_out(event: Event) -> EventOut:
         for fid in target_file_ids
         if (m := file_by_id.get(fid)) is not None
     ]
+    lc = int(getattr(event, "like_count", 0) or 0)
     return EventOut(
         id=event.id,
         event_name=event.event_name,
@@ -199,7 +213,53 @@ def build_event_out(event: Event) -> EventOut:
         change_remarks=event.change_remarks,
         deactivate_remarks=event.deactivate_remarks,
         deactivated_at=event.deactivated_at,
+        like_count=lc,
+        liked_by_me=liked_by_me,
         files=files,
+    )
+
+
+async def get_file_ids_for_event_list_card(db: AsyncSession, event: Event) -> list[int]:
+    """Ordered file IDs for the event's current published/staging view (no in-memory revisions)."""
+    ver = event.current_media_version
+    target_ver = ver if ver > 0 else 0
+    return await _get_file_ids_for_version(db, event, target_ver)
+
+
+def build_event_list_card(
+    event: Event, file_ids: list[int], *, liked_by_me: bool
+) -> EventListItemOut:
+    """Card row for GET /events: preview media and like fields."""
+    total = len(file_ids)
+    preview_ids = file_ids[:PREVIEW_MEDIA_LIMIT]
+    file_by_id = {m.id: m for m in event.media_items}
+    storage = get_storage()
+    preview_media: list[EventPreviewMediaItem] = []
+    for fid in preview_ids:
+        m = file_by_id.get(fid)
+        if m is None:
+            continue
+        preview_media.append(
+            EventPreviewMediaItem(
+                id=m.id,
+                file_type=m.file_type,
+                thumbnail_url=storage.get_read_url(m.thumbnail_url) if m.thumbnail_url else None,
+                file_url=storage.get_read_url(m.file_url),
+            )
+        )
+    remaining = max(0, total - PREVIEW_MEDIA_LIMIT)
+    lc = int(getattr(event, "like_count", 0) or 0)
+    return EventListItemOut(
+        id=event.id,
+        event_name=event.event_name,
+        sub_event_name=event.sub_event_name,
+        event_dates=event.event_dates,
+        description=event.description,
+        tags=event.tags,
+        like_count=lc,
+        liked_by_me=liked_by_me,
+        preview_media=preview_media,
+        remaining_media_count=remaining,
     )
 
 
@@ -208,17 +268,29 @@ async def list_events(
     page: int = 1,
     page_size: int = 20,
     status_filter: EventStatus | None = None,
+    search: str | None = None,
 ) -> tuple[list[Event], int]:
-    query = select(Event)
-    count_query = select(func.count()).select_from(Event)
+    effective_status = status_filter if status_filter is not None else EventStatus.ACTIVE
 
-    if status_filter:
-        query = query.where(Event.status == status_filter)
-        count_query = count_query.where(Event.status == status_filter)
+    query = select(Event).where(Event.status == effective_status)
+    count_query = select(func.count()).select_from(Event).where(Event.status == effective_status)
+
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        search_cond = or_(
+            Event.event_name.ilike(term),
+            func.coalesce(Event.description, "").ilike(term),
+            func.coalesce(cast(Event.tags, Text), "").ilike(term),
+        )
+        query = query.where(search_cond)
+        count_query = count_query.where(search_cond)
 
     total = (await db.execute(count_query)).scalar() or 0
     query = (
-        query.options(selectinload(Event.creator))
+        query.options(
+            selectinload(Event.creator),
+            selectinload(Event.media_items),
+        )
         .order_by(Event.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)

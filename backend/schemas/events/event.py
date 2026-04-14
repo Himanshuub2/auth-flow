@@ -59,6 +59,30 @@ class MediaFileSummary(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class EventPreviewMediaItem(BaseModel):
+    """Up to six thumbnails for the events list card."""
+
+    id: int
+    file_type: FileType
+    thumbnail_url: str | None = None
+    file_url: str
+
+
+class EventListItemOut(BaseModel):
+    """Paginated events feed: active events with preview media and likes."""
+
+    id: int
+    event_name: str
+    sub_event_name: str | None
+    event_dates: list | dict | None
+    description: str | None
+    tags: list | None
+    like_count: int
+    liked_by_me: bool
+    preview_media: list[EventPreviewMediaItem]
+    remaining_media_count: int
+
+
 class EventOut(BaseModel):
     id: int
     event_name: str
@@ -68,6 +92,7 @@ class EventOut(BaseModel):
     tags: list | None
     current_media_version: int
     current_revision_number: int
+    version_display: str
     status: EventStatus
     applicability_type: ApplicabilityType
     applicability_refs: dict | list | None
@@ -79,6 +104,8 @@ class EventOut(BaseModel):
     change_remarks: str | None = None
     deactivate_remarks: str | None = None
     deactivated_at: datetime | None = None
+    like_count: int = 0
+    liked_by_me: bool = False
     files: list[MediaFileSummary]
 
     model_config = {"from_attributes": True}

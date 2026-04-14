@@ -12,7 +12,7 @@ from routers import home as home_router
 from routers.documents import combined as doc_combined
 from routers.documents import documents as doc_router
 from routers.documents import reference as doc_reference
-from routers.events import auth, events, reference
+from routers.events import auth, events, media as events_media, reference, revisions as events_revisions
 from schemas.events.comman import APIResponse
 
 logging.basicConfig(
@@ -75,6 +75,8 @@ app.include_router(reference.router, prefix="/api/reference", tags=["Reference"]
 
 app.include_router(doc_combined.router, prefix="/api/items", tags=["Items"])
 
+app.include_router(events_media.router, prefix="/api/events/media", tags=["Events"])
+app.include_router(events_revisions.router, prefix="/api/events/revisions", tags=["Events"])
 app.include_router(events.router, prefix="/api/events", tags=["Events"])
 
 app.include_router(doc_router.router, prefix="/api/documents", tags=["Documents"])

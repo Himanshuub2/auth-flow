@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import enum
 from datetime import datetime
 
@@ -77,6 +79,14 @@ class Event(BaseEvents):
         back_populates="event", lazy="selectin",
     )
     creator: Mapped["User"] = relationship(lazy="joined", foreign_keys=[created_by])
+
+    like_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    likes: Mapped[list["EventLike"]] = relationship(
+        "EventLike",
+        back_populates="event",
+        lazy="select",
+        cascade="all, delete-orphan",
+    )
 
 
 class EventRevision(BaseEvents):

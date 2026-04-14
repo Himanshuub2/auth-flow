@@ -1,16 +1,17 @@
+import asyncio
+
 from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cache import cache_delete, cache_delete_prefix, cache_get, cache_set
-from config import settings
+from cache import cache_delete, cache_delete_prefix
 from database import get_db
 from models.events.event import Event, EventStatus
 from schemas.events.comman import APIResponse, APIResponsePaginated
-from schemas.events.event import EventOut, EventSavePayload, UploadUrlRequest, UploadUrlResponse
+from schemas.events.event import EventSavePayload, UploadUrlRequest, UploadUrlResponse
+from services.events import event_like_service
 from services.events import event_service
 from services.events.upload_url_service import generate_upload_urls
 from utils import cache_keys
-from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user
 from pydantic import BaseModel
 
@@ -22,44 +23,10 @@ class ToggleEventPayload(BaseModel):
 
 
 router = APIRouter()
-EVENT_LIST_CACHE_TTL = getattr(settings, "ITEM_DETAIL_CACHE_TTL_SECONDS", 300)
 
 
 def _minimal_event_data(event: Event) -> dict[str, int | str]:
     return {"id": event.id, "name": event.event_name}
-
-
-def _to_out(event: Event) -> EventOut:
-    from services.events.event_service import build_event_out
-    return build_event_out(event)
-
-
-def _to_list_out(event: Event) -> EventOut:
-    """Event for list endpoint: same as _to_out but files=[] (media not loaded)."""
-    ver = event.current_media_version
-    return EventOut(
-        id=event.id,
-        event_name=event.event_name,
-        sub_event_name=event.sub_event_name,
-        event_dates=event.event_dates,
-        description=event.description,
-        tags=event.tags,
-        current_media_version=ver,
-        current_revision_number=event.current_revision_number,
-        version_display=f"{ver}.{event.current_revision_number}",
-        status=event.status,
-        applicability_type=event.applicability_type,
-        applicability_refs=event.applicability_refs,
-        replaces_document_id=event.replaces_document_id,
-        created_by=event.created_by,
-        created_by_name=event.creator.username,
-        created_at=event.created_at,
-        updated_at=event.updated_at,
-        change_remarks=event.change_remarks,
-        deactivate_remarks=event.deactivate_remarks,
-        deactivated_at=format_date_dmy_month_abbr(event.deactivated_at) if event.deactivated_at else None,
-        files=[],
-    )
 
 
 @router.post("/upload-url", response_model=APIResponse)
@@ -112,27 +79,75 @@ async def update_event(
 async def list_events(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: EventStatus | None = None,
+    status: EventStatus | None = Query(
+        None,
+        description="Omit for ACTIVE-only (default). Pass DRAFT/INACTIVE to filter admin views.",
+    ),
+    search: str | None = Query(
+        None,
+        max_length=500,
+        description="Case-insensitive match on event name, description, or tags.",
+    ),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    cache_key = cache_keys.event_list(page, page_size, status.value if status else None)
-    cached = await cache_get(cache_key)
-    if cached is not None:
-        return APIResponsePaginated(**cached)
-
-    events, total = await event_service.list_events(db, page, page_size, status)
-    response = APIResponsePaginated(
+    events, total = await event_service.list_events(db, page, page_size, status, search)
+    event_ids = [e.id for e in events]
+    liked_ids = await event_like_service.event_ids_liked_by_user(db, user.id, event_ids)
+    file_ids_list = await asyncio.gather(
+        *[event_service.get_file_ids_for_event_list_card(db, e) for e in events]
+    )
+    data = [
+        event_service.build_event_list_card(e, ids, liked_by_me=(e.id in liked_ids))
+        for e, ids in zip(events, file_ids_list)
+    ]
+    return APIResponsePaginated(
         message="Events fetched",
         status_code=200,
         status="success",
-        data=[_to_list_out(e) for e in events],
+        data=data,
         total=total,
         page=page,
         page_size=page_size,
     )
-    await cache_set(cache_key, response.model_dump(mode="json"), ttl=EVENT_LIST_CACHE_TTL)
-    return response
+
+
+@router.post("/{event_id}/like", response_model=APIResponse)
+async def like_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    count, _ = await event_like_service.like_event(db, event_id, user.id)
+    await cache_delete_prefix("events:list:")
+    await cache_delete(cache_keys.event_item(event_id))
+    await cache_delete_prefix("items:list:")
+    await cache_delete("items:kpi")
+    return APIResponse(
+        message="Liked",
+        status_code=200,
+        status="success",
+        data={"like_count": count, "liked_by_me": True},
+    )
+
+
+@router.delete("/{event_id}/like", response_model=APIResponse)
+async def unlike_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    count, _ = await event_like_service.unlike_event(db, event_id, user.id)
+    await cache_delete_prefix("events:list:")
+    await cache_delete(cache_keys.event_item(event_id))
+    await cache_delete_prefix("items:list:")
+    await cache_delete("items:kpi")
+    return APIResponse(
+        message="Unliked",
+        status_code=200,
+        status="success",
+        data={"like_count": count, "liked_by_me": False},
+    )
 
 
 @router.get("/{event_id}", response_model=APIResponse)
@@ -141,14 +156,9 @@ async def get_event(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    cache_key = cache_keys.event_item(event_id)
-    cached = await cache_get(cache_key)
-    if cached is not None:
-        return APIResponse(message="Event fetched", status_code=200, status="success", data=cached)
-
     event = await event_service.get_event_with_relations(db, event_id)
-    out = _to_out(event)
-    await cache_set(cache_key, out.model_dump(mode="json"), ttl=EVENT_LIST_CACHE_TTL)
+    liked = await event_like_service.is_liked(db, user.id, event_id)
+    out = event_service.build_event_out(event, liked_by_me=liked)
     return APIResponse(message="Event fetched", status_code=200, status="success", data=out)
 
 

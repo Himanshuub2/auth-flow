@@ -5,7 +5,7 @@ from alembic import context
 
 from config import settings
 from database import Base
-from models.events import Event, EventMediaItem
+from models.events import Event, EventLike, EventMediaItem
 from models.events.user import User
 from models.documents import Document, DocumentRevision
 from models.documents.document_file import DocumentFile

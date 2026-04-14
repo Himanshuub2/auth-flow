@@ -251,3 +251,52 @@ def test_toggle_event_requires_deactivation_remarks(client: TestClient) -> None:
 
     resp = client.patch(f"/api/events/{event_id}/toggle-status")
     assert resp.status_code == 400
+
+
+def test_list_events_includes_card_fields(client: TestClient) -> None:
+    """List returns preview and like fields (ACTIVE default)."""
+    resp = client.get("/api/events/", params={"page": 1, "page_size": 5})
+    assert resp.status_code == 200
+    body = resp.json()
+    for item in body.get("data", []):
+        assert "preview_media" in item
+        assert "remaining_media_count" in item
+        assert "like_count" in item
+        assert "liked_by_me" in item
+
+
+def test_like_active_event(client: TestClient) -> None:
+    """POST like increments count for ACTIVE events."""
+    payload = _event_payload(
+        event_name=_uniq("Like Me"),
+        status=EventStatus.ACTIVE,
+        change_remarks="publish",
+    )
+    create = client.post("/api/events/", json=payload)
+    assert create.status_code == 201
+    event_id = create.json()["data"]["id"]
+
+    like = client.post(f"/api/events/{event_id}/like")
+    assert like.status_code == 200
+    d = like.json()["data"]
+    assert d["liked_by_me"] is True
+    assert d["like_count"] >= 1
+
+    detail = client.get(f"/api/events/{event_id}")
+    assert detail.status_code == 200
+    assert detail.json()["data"]["liked_by_me"] is True
+    assert detail.json()["data"]["like_count"] >= 1
+
+    unlike = client.delete(f"/api/events/{event_id}/like")
+    assert unlike.status_code == 200
+    assert unlike.json()["data"]["liked_by_me"] is False
+
+
+def test_like_draft_event_returns_400(client: TestClient) -> None:
+    """Only ACTIVE events can be liked."""
+    payload = _event_payload(event_name=_uniq("Draft"), status=EventStatus.DRAFT)
+    create = client.post("/api/events/", json=payload)
+    assert create.status_code == 201
+    event_id = create.json()["data"]["id"]
+    resp = client.post(f"/api/events/{event_id}/like")
+    assert resp.status_code == 400
