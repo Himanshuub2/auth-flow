@@ -5,16 +5,19 @@ Handles template generation, file upload + storage, Excel parsing,
 and bulk applicability updates for documents and events.
 """
 
+import asyncio
 import io
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import func, select, text, update
+from sqlalchemy import bindparam, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from utils.dates import format_date_dmy_month_abbr
 from models.documents.bulk_applicability import (
     BulkApplicabilityRequest,
     BulkApplicabilityStatus,
@@ -30,7 +33,6 @@ from models.events.event import (
     ApplicabilityType as EventApplicabilityType,
 )
 from models.events.user import User
-from storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +40,15 @@ ALLOWED_UPLOAD_EXTENSIONS = frozenset({"xlsx", "csv", "xls"})
 
 FIXED_COLUMNS = ["id", "type", "name", "updated_at"]
 
+# Safety cap so one upload cannot grow unbounded memory in parsed row list.
+MAX_BULK_APPLICABILITY_DATA_ROWS = 100_000
 
-# ---------------------------------------------------------------------------
-# Template generation
-# ---------------------------------------------------------------------------
+# Hard cap on physical data rows scanned (including blank rows) to limit CPU/DoS.
+MAX_BULK_APPLICABILITY_SCAN_ROWS = 500_000
+
+# Fewer round-trips than one UPDATE per row; keeps bind parameter batches bounded.
+_BULK_UPDATE_CHUNK = 500
+
 
 async def generate_template(
     db: AsyncSession,
@@ -84,19 +91,358 @@ async def generate_template(
     return buf, filename
 
 
+async def create_upload_request(
+    db: AsyncSession,
+    *,
+    file_name: str,
+    blob_path: str,
+    selected_types: list[str],
+    change_remarks: str | None,
+    user_id: str,
+) -> BulkApplicabilityRequest:
+    req = BulkApplicabilityRequest(
+        file_name=file_name,
+        uploaded_file_url=blob_path,
+        selected_types=selected_types,
+        status=BulkApplicabilityStatus.PENDING,
+        change_remarks=change_remarks,
+        created_by=user_id,
+        updated_by=user_id,
+    )
+    db.add(req)
+    await db.flush()
+    return req
+
+
+
+
+async def list_history(
+    db: AsyncSession,
+    page: int = 1,
+    page_size: int = 10,
+) -> tuple[list[BulkApplicabilityRequest], int]:
+    count_q = select(func.count()).select_from(BulkApplicabilityRequest)
+    total = (await db.execute(count_q)).scalar_one()
+
+    offset = (page - 1) * page_size
+    items_q = (
+        select(BulkApplicabilityRequest)
+        .order_by(BulkApplicabilityRequest.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    result = await db.execute(items_q)
+    items = list(result.scalars().all())
+    return items, total
+
+
+
+
+async def process_pending_requests(db: AsyncSession, user_id: str | None = None) -> dict:
+    """
+    Pick all PENDING requests ordered by created_at and process each.
+    Returns summary of processed/failed counts.
+    """
+    pending_q = (
+        select(BulkApplicabilityRequest)
+        .where(BulkApplicabilityRequest.status == BulkApplicabilityStatus.PENDING)
+        .order_by(BulkApplicabilityRequest.created_at.asc())
+    )
+    result = await db.execute(pending_q)
+    requests = list(result.scalars().all())
+
+    processed = 0
+    failed = 0
+
+    for req in requests:
+        req_id = req.id
+        try:
+            await _process_single_request(db, req, user_id)
+            processed += 1
+        except Exception:
+            failed += 1
+            await db.rollback()
+            logger.exception("Failed to process bulk applicability request %s", req_id)
+
+    return {"processed": processed, "failed": failed, "total": len(requests)}
+
+
+async def _process_single_request(
+    db: AsyncSession,
+    req: BulkApplicabilityRequest,
+    user_id: str | None = None,
+) -> None:
+    req_id = req.id
+    actor = user_id or req.updated_by or req.created_by
+
+    await db.execute(
+        update(BulkApplicabilityRequest)
+        .where(BulkApplicabilityRequest.id == req_id)
+        .values(
+            status=BulkApplicabilityStatus.IN_PROGRESS,
+            updated_by=actor,
+        )
+    )
+    await db.flush()
+
+    try:
+        path = _resolve_stored_path(req.uploaded_file_url)
+        # Parse in a worker thread so large CSV/XLSX work does not block the asyncio event loop.
+        parsed_rows = await asyncio.to_thread(_parse_uploaded_file_from_path, path, req.file_name)
+        await _apply_bulk_updates(db, parsed_rows, user_id or req.created_by)
+        await db.execute(
+            update(BulkApplicabilityRequest)
+            .where(BulkApplicabilityRequest.id == req_id)
+            .values(
+                status=BulkApplicabilityStatus.COMPLETED,
+                error_message=None,
+                updated_by=actor,
+            )
+        )
+        await db.flush()
+    except Exception as exc:
+        await db.rollback()
+        await db.execute(
+            update(BulkApplicabilityRequest)
+            .where(BulkApplicabilityRequest.id == req_id)
+            .values(
+                status=BulkApplicabilityStatus.FAILED,
+                error_message=str(exc),
+                updated_by=actor,
+            )
+        )
+        await db.flush()
+        logger.exception(
+            "Bulk applicability request %s failed: %s", req_id, exc
+        )
+
+
+def _resolve_stored_path(stored_path: str) -> Path:
+    path = Path(stored_path)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if not path.exists():
+        raise FileNotFoundError(f"Uploaded file not found at path: {path}")
+    return path
+
+
+def _cell_str(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _prepare_indices(
+    reference_row: list[str],
+    header_row: list[str],
+) -> tuple[int, int, list[tuple[int, str, str]]]:
+    header = [h.strip() for h in header_row]
+    id_idx = _find_column(header, "id")
+    type_idx = _find_column(header, "type")
+    division_indices: list[tuple[int, str, str]] = []
+    for i, h in enumerate(header):
+        if i > type_idx and h.lower() not in ("name", "updated_at", "id", "type"):
+            organization_vertical = reference_row[i].strip() if i < len(reference_row) else ""
+            division_indices.append((i, h, organization_vertical))
+    if not division_indices:
+        raise ValueError("No division columns found in the uploaded file")
+    return id_idx, type_idx, division_indices
+
+
+def _append_parsed_row(
+    row: list[str],
+    row_num: int,
+    id_idx: int,
+    type_idx: int,
+    division_indices: list[tuple[int, str, str]],
+    errors: list[str],
+    parsed: list[dict],
+) -> None:
+    if not any(cell.strip() for cell in row):
+        return
+
+    row_id = row[id_idx].strip() if id_idx < len(row) else ""
+    row_type = row[type_idx].strip() if type_idx < len(row) else ""
+
+    if not row_id:
+        errors.append(f"Row {row_num}: missing 'id'")
+        return
+
+    try:
+        int(row_id)
+    except ValueError:
+        errors.append(f"Row {row_num}: 'id' must be an integer, got '{row_id}'")
+        return
+
+    if not row_type:
+        errors.append(f"Row {row_num}: missing 'type'")
+        return
+
+    matched_divisions: set[str] = set()
+    for col_idx, division_name, _organization_vertical in division_indices:
+        val = row[col_idx].strip().upper() if col_idx < len(row) else ""
+        if val in ("Y", "YES"):
+            matched_divisions.add(division_name)
+        elif val in ("N", "NO", ""):
+            pass
+        else:
+            errors.append(
+                f"Row {row_num}, column '{division_name}': "
+                f"invalid value '{row[col_idx].strip()}'. Expected Y or N."
+            )
+
+    parsed.append({
+        "id": int(row_id),
+        "type": row_type,
+        "divisions": sorted(matched_divisions),
+        "row_num": row_num,
+    })
+
+
+def _raise_if_errors(errors: list[str]) -> None:
+    if errors:
+        raise ValueError("Validation errors:\n" + "\n".join(errors))
+
+
+def _parse_uploaded_file_from_path(path: Path, file_name: str) -> list[dict]:
+    """
+    Parse upload from disk. CSV and XLSX stream row-by-row (no full-sheet list).
+    Legacy .xls reads into memory once (openpyxl does not stream .xls reliably).
+    """
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    if ext == "csv":
+        return _parse_csv_path(path)
+    if ext == "xlsx":
+        return _parse_excel_path(path)
+    if ext == "xls":
+        return _parse_excel_from_bytes(path.read_bytes())
+    raise ValueError(f"Unsupported file extension: {ext}")
+
+
+def _parse_csv_path(path: Path) -> list[dict]:
+    import csv
+
+    errors: list[str] = []
+    parsed: list[dict] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        try:
+            ref = next(reader)
+            hdr = next(reader)
+        except StopIteration as exc:
+            raise ValueError(
+                "CSV must have reference row, header row, and at least one data row"
+            ) from exc
+        reference_row = [str(c) if c is not None else "" for c in ref]
+        header_row = [str(c) if c is not None else "" for c in hdr]
+        id_idx, type_idx, division_indices = _prepare_indices(reference_row, header_row)
+        for row_num, raw in enumerate(reader, start=1):
+            if row_num > MAX_BULK_APPLICABILITY_SCAN_ROWS:
+                raise ValueError(
+                    f"Too many rows in file (max {MAX_BULK_APPLICABILITY_SCAN_ROWS} data rows)."
+                )
+            row = [str(c) if c is not None else "" for c in raw]
+            _append_parsed_row(row, row_num, id_idx, type_idx, division_indices, errors, parsed)
+            if len(parsed) > MAX_BULK_APPLICABILITY_DATA_ROWS:
+                raise ValueError(
+                    f"Too many non-empty data rows (max {MAX_BULK_APPLICABILITY_DATA_ROWS})."
+                )
+    _raise_if_errors(errors)
+    return parsed
+
+
+def _parse_excel_path(path: Path) -> list[dict]:
+    wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+    try:
+        return _consume_excel_rows(wb.active)
+    finally:
+        wb.close()
+
+
+def _parse_excel_from_bytes(file_bytes: bytes) -> list[dict]:
+    wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    try:
+        return _consume_excel_rows(wb.active)
+    finally:
+        wb.close()
+
+
+def _consume_excel_rows(ws) -> list[dict]:
+    it = ws.iter_rows(values_only=True)
+    try:
+        r0 = next(it)
+        r1 = next(it)
+    except StopIteration as exc:
+        raise ValueError(
+            "Excel must have reference row, header row, and at least one data row"
+        ) from exc
+    reference_row = [_cell_str(c) for c in r0]
+    header_row = [_cell_str(c) for c in r1]
+    id_idx, type_idx, division_indices = _prepare_indices(reference_row, header_row)
+    errors: list[str] = []
+    parsed: list[dict] = []
+    for row_num, raw in enumerate(it, start=1):
+        if row_num > MAX_BULK_APPLICABILITY_SCAN_ROWS:
+            raise ValueError(
+                f"Too many rows in file (max {MAX_BULK_APPLICABILITY_SCAN_ROWS} data rows)."
+            )
+        row = [_cell_str(c) for c in raw] if raw else []
+        _append_parsed_row(row, row_num, id_idx, type_idx, division_indices, errors, parsed)
+        if len(parsed) > MAX_BULK_APPLICABILITY_DATA_ROWS:
+            raise ValueError(
+                f"Too many non-empty data rows (max {MAX_BULK_APPLICABILITY_DATA_ROWS})."
+            )
+    _raise_if_errors(errors)
+    return parsed
+
+
+def _find_column(header: list[str], name: str) -> int:
+    for i, h in enumerate(header):
+        if h.lower() == name.lower():
+            return i
+    raise ValueError(f"Required column '{name}' not found in header: {header}")
+
+
+
 async def _get_division_columns(db: AsyncSession) -> list[tuple[str, str]]:
     """
     Returns ordered (organization_vertical, division_cluster) pairs.
     Row 1 uses organization_vertical (reference only), row 2 uses division_cluster headers.
     """
+    if await _has_users_org_vertical_column(db):
+        result = await db.execute(
+            select(User.organization_vertical, User.division_cluster)
+            .where(User.division_cluster.isnot(None))
+            .where(User.division_cluster != "")
+            .distinct()
+            .order_by(User.organization_vertical, User.division_cluster)
+        )
+        return [(row[0] or "", row[1]) for row in result.all()]
+
     result = await db.execute(
-        select(User.organization_vertical, User.division_cluster)
+        select(User.division_cluster)
         .where(User.division_cluster.isnot(None))
         .where(User.division_cluster != "")
         .distinct()
-        .order_by(User.organization_vertical, User.division_cluster)
+        .order_by(User.division_cluster)
     )
-    return [(row[0], row[1]) for row in result.all()]
+    return [("", row[0]) for row in result.all()]
+
+
+async def _has_users_org_vertical_column(db: AsyncSession) -> bool:
+    q = await db.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'users'
+              AND table_name = 'users'
+              AND column_name = 'organization_vertical'
+            LIMIT 1
+            """
+        )
+    )
+    return q.first() is not None
 
 
 async def _fetch_document_rows(
@@ -174,8 +520,9 @@ def _write_data_rows(ws, rows: list[dict]) -> None:
         ws.cell(row=row_idx, column=2, value=row_data["type"])
         ws.cell(row=row_idx, column=3, value=row_data["name"])
         updated = row_data.get("updated_at")
+        
         if isinstance(updated, datetime):
-            ws.cell(row=row_idx, column=4, value=updated.strftime("%d/%m/%Y"))
+            ws.cell(row=row_idx, column=4, value=format_date_dmy_month_abbr(updated))
         else:
             ws.cell(row=row_idx, column=4, value=str(updated) if updated else "")
 
@@ -213,260 +560,12 @@ def _apply_styles(
 
     ws.freeze_panes = "A3"
     ws.sheet_properties.tabColor = "1F4E79"
-    # Keep the template fully editable so admins can update cells
-    # and delete rows as needed.
     ws.protection.sheet = False
 
 
 # ---------------------------------------------------------------------------
 # Upload handling
 # ---------------------------------------------------------------------------
-
-async def create_upload_request(
-    db: AsyncSession,
-    *,
-    file_name: str,
-    blob_path: str,
-    selected_types: list[str],
-    change_remarks: str | None,
-    user_id: str,
-) -> BulkApplicabilityRequest:
-    req = BulkApplicabilityRequest(
-        file_name=file_name,
-        uploaded_file_url=blob_path,
-        selected_types=selected_types,
-        status=BulkApplicabilityStatus.PENDING,
-        change_remarks=change_remarks,
-        created_by=user_id,
-        updated_by=user_id,
-    )
-    db.add(req)
-    await db.flush()
-    return req
-
-
-# ---------------------------------------------------------------------------
-# History
-# ---------------------------------------------------------------------------
-
-async def list_history(
-    db: AsyncSession,
-    page: int = 1,
-    page_size: int = 10,
-) -> tuple[list[BulkApplicabilityRequest], int]:
-    count_q = select(func.count()).select_from(BulkApplicabilityRequest)
-    total = (await db.execute(count_q)).scalar_one()
-
-    offset = (page - 1) * page_size
-    items_q = (
-        select(BulkApplicabilityRequest)
-        .order_by(BulkApplicabilityRequest.created_at.desc())
-        .offset(offset)
-        .limit(page_size)
-    )
-    result = await db.execute(items_q)
-    items = list(result.scalars().all())
-    return items, total
-
-
-# ---------------------------------------------------------------------------
-# Processing engine (called by cron or force-start)
-# ---------------------------------------------------------------------------
-
-async def process_pending_requests(db: AsyncSession, user_id: str | None = None) -> dict:
-    """
-    Pick all PENDING requests ordered by created_at and process each.
-    Returns summary of processed/failed counts.
-    """
-    pending_q = (
-        select(BulkApplicabilityRequest)
-        .where(BulkApplicabilityRequest.status == BulkApplicabilityStatus.PENDING)
-        .order_by(BulkApplicabilityRequest.created_at.asc())
-    )
-    result = await db.execute(pending_q)
-    requests = list(result.scalars().all())
-
-    processed = 0
-    failed = 0
-
-    for req in requests:
-        try:
-            await _process_single_request(db, req, user_id)
-            processed += 1
-        except Exception:
-            failed += 1
-            logger.exception("Failed to process bulk applicability request %s", req.id)
-
-    return {"processed": processed, "failed": failed, "total": len(requests)}
-
-
-async def _process_single_request(
-    db: AsyncSession,
-    req: BulkApplicabilityRequest,
-    user_id: str | None = None,
-) -> None:
-    req.status = BulkApplicabilityStatus.IN_PROGRESS
-    if user_id:
-        req.updated_by = user_id
-    await db.flush()
-
-    try:
-        file_bytes = await _download_blob(req.uploaded_file_url)
-        parsed_rows = _parse_uploaded_file(file_bytes, req.file_name)
-        await _apply_bulk_updates(db, parsed_rows, user_id or req.created_by)
-
-        req.status = BulkApplicabilityStatus.COMPLETED
-        req.error_message = None
-    except Exception as exc:
-        await db.rollback()
-        req.status = BulkApplicabilityStatus.FAILED
-        req.error_message = str(exc)
-        logger.exception(
-            "Bulk applicability request %s failed: %s", req.id, exc
-        )
-
-    if user_id:
-        req.updated_by = user_id
-    db.add(req)
-    await db.flush()
-
-
-async def _download_blob(blob_path: str) -> bytes:
-    storage = get_storage()
-    if getattr(storage, "_bypass", False):
-        raise RuntimeError(
-            "Azure bypass is enabled; cannot download uploaded file. "
-            "Disable BYPASS_AZURE_UPLOAD to process bulk uploads."
-        )
-
-    container = await storage._get_container()
-    blob_client = container.get_blob_client(blob_path)
-    download_stream = await blob_client.download_blob()
-    return await download_stream.readall()
-
-
-def _parse_uploaded_file(file_bytes: bytes, file_name: str) -> list[dict]:
-    """
-    Parse the uploaded Excel/CSV file and return a list of row dicts.
-    Each dict: {id, type, divisions: [list of division names with Y]}
-    """
-    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-
-    if ext == "csv":
-        return _parse_csv(file_bytes)
-    elif ext in ("xlsx", "xls"):
-        return _parse_excel(file_bytes)
-    else:
-        raise ValueError(f"Unsupported file extension: {ext}")
-
-
-def _parse_csv(file_bytes: bytes) -> list[dict]:
-    import csv
-
-    text = file_bytes.decode("utf-8-sig")
-    reader = csv.reader(io.StringIO(text))
-    all_rows = list(reader)
-
-    if len(all_rows) < 3:
-        raise ValueError("CSV must have reference row, header row, and at least one data row")
-
-    reference_row = all_rows[0]
-    header_row = all_rows[1]
-    data_rows = all_rows[2:]
-    return _rows_to_dicts(reference_row, header_row, data_rows)
-
-
-def _parse_excel(file_bytes: bytes) -> list[dict]:
-    wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
-    ws = wb.active
-
-    all_rows = []
-    for row in ws.iter_rows(values_only=True):
-        all_rows.append([str(c) if c is not None else "" for c in row])
-
-    if len(all_rows) < 3:
-        raise ValueError("Excel must have reference row, header row, and at least one data row")
-
-    reference_row = all_rows[0]
-    header_row = all_rows[1]
-    data_rows = all_rows[2:]
-    return _rows_to_dicts(reference_row, header_row, data_rows)
-
-
-def _rows_to_dicts(
-    reference_row: list[str],
-    header_row: list[str],
-    data_rows: list[list[str]],
-) -> list[dict]:
-    header = [h.strip() for h in header_row]
-
-    id_idx = _find_column(header, "id")
-    type_idx = _find_column(header, "type")
-
-    division_indices: list[tuple[int, str, str]] = []
-    for i, h in enumerate(header):
-        if i > type_idx and h.lower() not in ("name", "updated_at", "id", "type"):
-            organization_vertical = reference_row[i].strip() if i < len(reference_row) else ""
-            division_indices.append((i, h, organization_vertical))
-
-    if not division_indices:
-        raise ValueError("No division columns found in the uploaded file")
-
-    errors: list[str] = []
-    parsed: list[dict] = []
-
-    for row_num, row in enumerate(data_rows, start=1):
-        if not any(cell.strip() for cell in row):
-            continue
-
-        row_id = row[id_idx].strip() if id_idx < len(row) else ""
-        row_type = row[type_idx].strip() if type_idx < len(row) else ""
-
-        if not row_id:
-            errors.append(f"Row {row_num}: missing 'id'")
-            continue
-
-        try:
-            int(row_id)
-        except ValueError:
-            errors.append(f"Row {row_num}: 'id' must be an integer, got '{row_id}'")
-            continue
-
-        if not row_type:
-            errors.append(f"Row {row_num}: missing 'type'")
-            continue
-
-        matched_divisions: set[str] = set()
-        for col_idx, division_name, _organization_vertical in division_indices:
-            val = row[col_idx].strip().upper() if col_idx < len(row) else ""
-            if val in ("Y", "YES"):
-                matched_divisions.add(division_name)
-            elif val in ("N", "NO", ""):
-                pass
-            else:
-                errors.append(
-                    f"Row {row_num}, column '{division_name}': "
-                    f"invalid value '{row[col_idx].strip()}'. Expected Y or N."
-                )
-
-        parsed.append({
-            "id": int(row_id),
-            "type": row_type,
-            "divisions": sorted(matched_divisions),
-            "row_num": row_num,
-        })
-
-    if errors:
-        raise ValueError("Validation errors:\n" + "\n".join(errors))
-
-    return parsed
-
-
-def _find_column(header: list[str], name: str) -> int:
-    for i, h in enumerate(header):
-        if h.lower() == name.lower():
-            return i
-    raise ValueError(f"Required column '{name}' not found in header: {header}")
 
 
 # ---------------------------------------------------------------------------
@@ -555,17 +654,34 @@ async def _batch_update_documents(
     updates: list[dict],
     user_id: str,
 ) -> None:
+    # Core Table update (not ORM entity) so executemany + bindparam works without
+    # SQLAlchemy's "bulk UPDATE by primary key" parameter naming rules.
+    tbl = Document.__table__
     now = datetime.now(timezone.utc)
-    for entry in updates:
+    stmt = (
+        update(tbl)
+        .where(tbl.c.id == bindparam("doc_id"))
+        .values(
+            applicability_type=bindparam("app_type"),
+            applicability_refs=bindparam("app_refs"),
+            updated_by=bindparam("upd_by"),
+            updated_at=bindparam("upd_at"),
+        )
+    )
+    for i in range(0, len(updates), _BULK_UPDATE_CHUNK):
+        chunk = updates[i : i + _BULK_UPDATE_CHUNK]
         await db.execute(
-            update(Document)
-            .where(Document.id == entry["id"])
-            .values(
-                applicability_type=DocApplicabilityType(entry["applicability_type"]),
-                applicability_refs=entry["applicability_refs"],
-                updated_by=user_id,
-                updated_at=now,
-            )
+            stmt,
+            [
+                {
+                    "doc_id": entry["id"],
+                    "app_type": DocApplicabilityType(entry["applicability_type"]),
+                    "app_refs": entry["applicability_refs"],
+                    "upd_by": user_id,
+                    "upd_at": now,
+                }
+                for entry in chunk
+            ],
         )
 
 
@@ -574,15 +690,30 @@ async def _batch_update_events(
     updates: list[dict],
     user_id: str,
 ) -> None:
+    tbl = Event.__table__
     now = datetime.now(timezone.utc)
-    for entry in updates:
+    stmt = (
+        update(tbl)
+        .where(tbl.c.id == bindparam("evt_id"))
+        .values(
+            applicability_type=bindparam("app_type"),
+            applicability_refs=bindparam("app_refs"),
+            updated_by=bindparam("upd_by"),
+            updated_at=bindparam("upd_at"),
+        )
+    )
+    for i in range(0, len(updates), _BULK_UPDATE_CHUNK):
+        chunk = updates[i : i + _BULK_UPDATE_CHUNK]
         await db.execute(
-            update(Event)
-            .where(Event.id == entry["id"])
-            .values(
-                applicability_type=EventApplicabilityType(entry["applicability_type"]),
-                applicability_refs=entry["applicability_refs"],
-                updated_by=user_id,
-                updated_at=now,
-            )
+            stmt,
+            [
+                {
+                    "evt_id": entry["id"],
+                    "app_type": EventApplicabilityType(entry["applicability_type"]),
+                    "app_refs": entry["applicability_refs"],
+                    "upd_by": user_id,
+                    "upd_at": now,
+                }
+                for entry in chunk
+            ],
         )

@@ -1,5 +1,9 @@
 import logging
+import os
+from pathlib import Path
 import uuid
+
+UPLOAD_CHUNK_BYTES = 1024 * 1024  # stream large files without holding full body in RAM
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -14,7 +18,6 @@ from schemas.documents.bulk_applicability import (
 )
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from services.documents import bulk_applicability_service as svc
-from storage import get_storage
 from utils.security import CurrentUser, is_active_master_or_policy_or_kh_admin
 
 logger = logging.getLogger(__name__)
@@ -22,6 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = frozenset({"xlsx", "csv", "xls"})
+LOCAL_UPLOAD_ROOT = Path("uploads") / "bulk-applicability"
 
 
 def _get_extension(filename: str) -> str:
@@ -70,15 +74,22 @@ async def upload_bulk_file(
         types_list = [t.value for t in DocumentType] + ["EVENTS"]
 
     slug = uuid.uuid4().hex[:12]
-    blob_path = f"bulk-applicability/uploads/{slug}/{file.filename}"
+    safe_name = os.path.basename(file.filename)
+    relative_path = LOCAL_UPLOAD_ROOT / slug / safe_name
+    absolute_path = Path.cwd() / relative_path
+    absolute_path.parent.mkdir(parents=True, exist_ok=True)
 
-    storage = get_storage()
-    await storage.save(file, blob_path, content_type=file.content_type)
+    with absolute_path.open("wb") as out:
+        while True:
+            chunk = await file.read(UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            out.write(chunk)
 
     req = await svc.create_upload_request(
         db,
         file_name=file.filename,
-        blob_path=blob_path,
+        blob_path=str(relative_path).replace("\\", "/"),
         selected_types=types_list,
         change_remarks=change_remarks,
         user_id=user.id,
@@ -111,15 +122,11 @@ async def get_history(
     user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
 ):
     items, total = await svc.list_history(db, page, page_size)
-    storage = get_storage()
 
     data = []
     for item in items:
-        file_sas_url = None
-        try:
-            file_sas_url = storage.get_read_url(item.uploaded_file_url)
-        except Exception:
-            logger.warning("Could not generate SAS URL for %s", item.uploaded_file_url)
+        # Local mode: return stored relative path directly.
+        file_sas_url = item.uploaded_file_url
 
         data.append(
             BulkApplicabilityHistoryItem(
