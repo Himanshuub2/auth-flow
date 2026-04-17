@@ -37,6 +37,7 @@ def upgrade() -> None:
         sa.Column("email", sa.String(255), nullable=False),
         sa.Column("username", sa.String(255), nullable=False),
         sa.Column("organization_type", sa.String(255), nullable=True),
+        sa.Column("organization_vertical", sa.String(255), nullable=True),
         sa.Column("division_cluster", sa.String(100), nullable=True),
         sa.Column("department", sa.String(100), nullable=True),
         sa.Column("designation", sa.String(100), nullable=True),
@@ -180,6 +181,51 @@ def upgrade() -> None:
         "'IMAGE','DOCUMENT'"
         "); EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
     ))
+    op.execute(sa.text(
+        f"DO $$ BEGIN CREATE TYPE {DOCUMENTS}.bulk_applicability_status AS ENUM ("
+        "'PENDING','IN_PROGRESS','COMPLETED','FAILED'"
+        "); EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+    ))
+
+    # ─── Documents schema: bulk_applicability_requests ───────────────────
+    op.create_table(
+        "bulk_applicability_requests",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("file_name", sa.String(255), nullable=False),
+        sa.Column("uploaded_file_url", sa.String(500), nullable=False),
+        sa.Column("selected_types", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
+        sa.Column(
+            "status",
+            postgresql.ENUM(
+                "PENDING", "IN_PROGRESS", "COMPLETED", "FAILED",
+                name="bulk_applicability_status", schema=DOCUMENTS, create_type=False,
+            ),
+            nullable=False,
+            server_default="PENDING",
+        ),
+        sa.Column("error_message", sa.Text(), nullable=True),
+        sa.Column("change_remarks", sa.Text(), nullable=True),
+        sa.Column("created_by", sa.String(255), nullable=False),
+        sa.Column("updated_by", sa.String(255), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.ForeignKeyConstraint(["created_by"], [f"{USERS}.users.staff_id"]),
+        sa.ForeignKeyConstraint(["updated_by"], [f"{USERS}.users.staff_id"], ondelete="SET NULL"),
+        sa.PrimaryKeyConstraint("id"),
+        schema=DOCUMENTS,
+    )
+    op.create_index(
+        "ix_bulk_applicability_status_created",
+        "bulk_applicability_requests",
+        ["status", "created_at"],
+        schema=DOCUMENTS,
+    )
+    op.create_index(
+        "ix_bulk_applicability_updated_at",
+        "bulk_applicability_requests",
+        ["updated_at"],
+        schema=DOCUMENTS,
+    )
 
     # ─── Documents schema: legislation ──────────────────────────────────
     op.create_table(
@@ -371,12 +417,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_bulk_applicability_updated_at", table_name="bulk_applicability_requests", schema=DOCUMENTS)
+    op.drop_index("ix_bulk_applicability_status_created", table_name="bulk_applicability_requests", schema=DOCUMENTS)
+    op.drop_table("bulk_applicability_requests", schema=DOCUMENTS)
     op.drop_table("files", schema=DOCUMENTS)
     op.drop_table("document_revisions", schema=DOCUMENTS)
     op.drop_table("documents", schema=DOCUMENTS)
     op.drop_table("sub_legislation", schema=DOCUMENTS)
     op.drop_table("legislation", schema=DOCUMENTS)
-    for name in ("doc_file_type", "doc_applicability_type", "document_status", "document_type"):
+    for name in ("bulk_applicability_status", "doc_file_type", "doc_applicability_type", "document_status", "document_type"):
         op.execute(sa.text(f"DROP TYPE IF EXISTS {DOCUMENTS}.{name}"))
 
     op.drop_table("files", schema=EVENTS)

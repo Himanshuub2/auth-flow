@@ -9,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from cache import close_redis
 from routers import home as home_router
+from routers.documents import bulk_applicability as bulk_app_router
 from routers.documents import combined as doc_combined
 from routers.documents import documents as doc_router
 from routers.documents import reference as doc_reference
@@ -81,6 +82,7 @@ app.include_router(events.router, prefix="/api/events", tags=["Events"])
 
 app.include_router(doc_router.router, prefix="/api/documents", tags=["Documents"])
 app.include_router(doc_reference.router, prefix="/api/reference/documents", tags=["Document Reference"])
+app.include_router(bulk_app_router.router, prefix="/api/bulk-applicability", tags=["Bulk Applicability"])
 
 
 @app.get("/health")

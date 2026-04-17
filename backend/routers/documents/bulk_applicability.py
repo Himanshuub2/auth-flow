@@ -1,0 +1,163 @@
+import logging
+import uuid
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database import get_db
+from models.documents.document import DocumentType
+from schemas.documents.bulk_applicability import (
+    BulkApplicabilityHistoryItem,
+    BulkApplicabilityUploadOut,
+    DownloadTemplateRequest,
+)
+from schemas.events.comman import APIResponse, APIResponsePaginated
+from services.documents import bulk_applicability_service as svc
+from storage import get_storage
+from utils.security import CurrentUser, is_active_master_or_policy_or_kh_admin
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+ALLOWED_EXTENSIONS = frozenset({"xlsx", "csv", "xls"})
+
+
+def _get_extension(filename: str) -> str:
+    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+@router.post("/download-template")
+async def download_template(
+    body: DownloadTemplateRequest,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
+):
+    buf, filename = await svc.generate_template(db, body.selected_types)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/upload", response_model=APIResponse, status_code=202)
+async def upload_bulk_file(
+    file: UploadFile = File(...),
+    selected_types: str | None = Form(
+        None,
+        description="Optional comma-separated types, e.g. POLICY,EWS,EVENTS. If omitted, all types are processed.",
+    ),
+    change_remarks: str | None = Form(None),
+    force_start: bool = Form(False, description="If true, process immediately instead of queuing for cron"),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
+):
+    if not file.filename:
+        raise HTTPException(400, detail="File name is required")
+
+    ext = _get_extension(file.filename)
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            400,
+            detail=f"Invalid file extension '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+
+    if selected_types:
+        types_list = [t.strip().upper() for t in selected_types.split(",") if t.strip()]
+    else:
+        types_list = [t.value for t in DocumentType] + ["EVENTS"]
+
+    slug = uuid.uuid4().hex[:12]
+    blob_path = f"bulk-applicability/uploads/{slug}/{file.filename}"
+
+    storage = get_storage()
+    await storage.save(file, blob_path, content_type=file.content_type)
+
+    req = await svc.create_upload_request(
+        db,
+        file_name=file.filename,
+        blob_path=blob_path,
+        selected_types=types_list,
+        change_remarks=change_remarks,
+        user_id=user.id,
+    )
+
+    if force_start:
+        try:
+            await svc.process_pending_requests(db, user_id=user.id)
+        except Exception:
+            logger.exception("Force-start processing failed for request %s", req.id)
+
+    return APIResponse(
+        message="File uploaded successfully. Processing queued."
+        if not force_start
+        else "File uploaded and processing started.",
+        status_code=202,
+        status="success",
+        data=BulkApplicabilityUploadOut(
+            request_id=req.id,
+            message="Processing queued" if not force_start else "Processing started",
+        ).model_dump(),
+    )
+
+
+@router.get("/history", response_model=APIResponsePaginated)
+async def get_history(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
+):
+    items, total = await svc.list_history(db, page, page_size)
+    storage = get_storage()
+
+    data = []
+    for item in items:
+        file_sas_url = None
+        try:
+            file_sas_url = storage.get_read_url(item.uploaded_file_url)
+        except Exception:
+            logger.warning("Could not generate SAS URL for %s", item.uploaded_file_url)
+
+        data.append(
+            BulkApplicabilityHistoryItem(
+                id=item.id,
+                updated_by=item.creator.username if item.creator else item.created_by,
+                updated_on=item.updated_at,
+                status=item.status,
+                file_name=item.file_name,
+                file_sas_url=file_sas_url,
+                error=item.error_message,
+                change_remarks=item.change_remarks,
+            ).model_dump()
+        )
+
+    return APIResponsePaginated(
+        message="History fetched",
+        status_code=200,
+        status="success",
+        data=data,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/process-pending", response_model=APIResponse)
+async def process_pending(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
+):
+    """
+    Internal endpoint for cron / Azure Function to trigger processing.
+    Can also be called manually by admins.
+    """
+    summary = await svc.process_pending_requests(db, user_id=user.id)
+    return APIResponse(
+        message="Processing complete",
+        status_code=200,
+        status="success",
+        data=summary,
+    )

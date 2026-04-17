@@ -15,6 +15,7 @@ class User(BaseUsers):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     organization_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    organization_vertical: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     division_cluster: Mapped[str | None] = mapped_column(String(100), nullable=True)
     department: Mapped[str | None] = mapped_column(String(100), nullable=True)

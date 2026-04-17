@@ -15,6 +15,7 @@ azure-identity
 azure-keyvault-secrets
 filetype
 slowapi==0.1.9
+openpyxl==3.1.5
 
 # Testing
 pytest==8.3.4

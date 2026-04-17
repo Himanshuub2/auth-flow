@@ -8,6 +8,7 @@ from database import Base
 from models.events import Event, EventLike, EventMediaItem
 from models.events.user import User
 from models.documents import Document, DocumentRevision
+from models.documents.bulk_applicability import BulkApplicabilityRequest  # noqa: F401
 from models.documents.document_file import DocumentFile
 from models.documents.legislation import Legislation, SubLegislation
 

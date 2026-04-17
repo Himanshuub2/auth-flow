@@ -36,4 +36,11 @@ async def get_media(
         )
         for i in items
     ]
-    return APIResponse(message="Media fetched", status_code=200, status="success", data=data)
+    return APIResponse(message="Media fetched", 
+    status_code=200, 
+    status="success", 
+    data=data,
+    total=len(items),
+    page=1,
+    page_size=len(items),
+    )
