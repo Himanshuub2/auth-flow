@@ -130,6 +130,16 @@ async def create_upload_request(
 
 
 
+async def get_history_by_id(
+    db: AsyncSession,
+    request_id: int,
+) -> BulkApplicabilityRequest | None:
+    result = await db.execute(
+        select(BulkApplicabilityRequest).where(BulkApplicabilityRequest.id == request_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def list_history(
     db: AsyncSession,
     page: int = 1,
@@ -324,8 +334,11 @@ def _append_parsed_row(
         return
 
     matched_divisions: set[str] = set()
+    has_any_y_or_n: bool = False
     for col_idx, division_name, _organization_vertical in division_indices:
         val = row[col_idx].strip().upper() if col_idx < len(row) else ""
+        if val in ("Y", "YES", "N", "NO"):
+            has_any_y_or_n = True
         if val in ("Y", "YES"):
             matched_divisions.add(division_name)
         elif val in ("N", "NO", ""):
@@ -335,6 +348,10 @@ def _append_parsed_row(
                 f"Row {row_num}, column '{division_name}': "
                 f"invalid value '{row[col_idx].strip()}'. Expected Y or N."
             )
+
+    # No division cell was filled with Y/N: leave this document/event unchanged.
+    if not has_any_y_or_n:
+        return
 
     parsed.append({
         "id": int(row_id),
@@ -649,7 +666,10 @@ async def _apply_bulk_updates(
     rows: list[dict],
     user_id: str,
 ) -> None:
-    """All-or-nothing: validate all IDs exist, then batch UPDATE."""
+    """
+    Validate IDs exist, then batch UPDATE.
+    Rows only include records where at least one division cell was Y/N; others were skipped at parse time.
+    """
     doc_updates: list[dict] = []
     event_updates: list[dict] = []
 

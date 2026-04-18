@@ -18,6 +18,7 @@ from schemas.documents.bulk_applicability import (
 )
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from services.documents import bulk_applicability_service as svc
+from storage import get_storage
 from utils.security import CurrentUser, is_active_master_or_policy_or_kh_admin
 
 logger = logging.getLogger(__name__)
@@ -121,17 +122,21 @@ async def upload_bulk_file(
 async def get_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
+    request_id: int | None = Query(
+        None,
+        description="return only this request with a fresh file_sas_url.",
+    ),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
 ):
-    items, total = await svc.list_history(db, page, page_size)
+    storage = get_storage()
 
-    data = []
-    for item in items:
-        # Local mode: return stored relative path directly.
-        file_sas_url = item.uploaded_file_url
-
-        data.append(
+    if request_id is not None:
+        item = await svc.get_history_by_id(db, request_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Bulk applicability request not found")
+        file_sas_url = storage.get_read_url(item.uploaded_file_url)
+        data = [
             BulkApplicabilityHistoryItem(
                 id=item.id,
                 updated_by=item.creator.username if item.creator else item.created_by,
@@ -139,6 +144,30 @@ async def get_history(
                 status=item.status,
                 file_name=item.file_name,
                 file_sas_url=file_sas_url,
+                error=item.error_message,
+                change_remarks=item.change_remarks,
+            ).model_dump()
+            
+        ]
+        return APIResponse(
+            message="History fetched",
+            status_code=200,
+            status="success",
+            data=data[0],
+        )
+
+    items, total = await svc.list_history(db, page, page_size)
+
+    data = []
+    for item in items:
+        data.append(
+            BulkApplicabilityHistoryItem(
+                id=item.id,
+                updated_by=item.creator.username if item.creator else item.created_by,
+                updated_on=item.updated_at,
+                status=item.status,
+                file_name=item.file_name,
+                file_sas_url=None,
                 error=item.error_message,
                 change_remarks=item.change_remarks,
             ).model_dump()
