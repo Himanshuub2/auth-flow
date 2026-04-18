@@ -152,6 +152,22 @@ class AzureBlobStorageBackend(StorageBackend):
         except Exception:
             logger.warning("Azure blob delete failed: %s/%s", self._container_name, path, exc_info=True)
 
+    async def read_bytes(self, path: str) -> bytes:
+        """Download full blob body for server-side processing (e.g. bulk applicability)."""
+        if self._bypass:
+            raise OSError(
+                "Cannot read blobs when BYPASS_AZURE_UPLOAD is enabled; "
+                "use real Azure storage for bulk applicability processing."
+            )
+        try:
+            container = await self._get_container()
+            blob = container.get_blob_client(path)
+            downloader = await blob.download_blob()
+            return await downloader.readall()
+        except Exception:
+            logger.exception("Azure blob download failed: %s/%s", self._container_name, path)
+            raise
+
     def get_read_url(self, path_or_url: str) -> str:
         """
         Always return a fresh SAS URL (10 min expiry). If path_or_url is a blob path

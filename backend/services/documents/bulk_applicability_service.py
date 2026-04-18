@@ -1,14 +1,12 @@
 """
 Bulk Applicability Service
 --------------------------
-Handles template generation, file upload + storage, Excel parsing,
-and bulk applicability updates for documents and events.
+Template generation, Azure blob download + parse, bulk applicability updates.
 """
 
 import asyncio
 import io
 import logging
-from pathlib import Path
 from datetime import datetime, timezone
 
 from openpyxl import Workbook, load_workbook
@@ -33,6 +31,7 @@ from models.events.event import (
     ApplicabilityType as EventApplicabilityType,
 )
 from models.events.user import User
+from storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -243,9 +242,10 @@ async def _process_single_request(
     # transaction, rollback would undo the new bulk_applicability row so UPDATE … FAILED
     # would match 0 rows.
     try:
-        path = _resolve_stored_path(req.uploaded_file_url)
+        storage = get_storage()
+        file_bytes = await storage.read_bytes(req.uploaded_file_url.strip())
         parsed_rows = await asyncio.to_thread(
-            _parse_uploaded_file_from_path, path, req.file_name
+            _parse_uploaded_file_from_bytes, file_bytes, req.file_name
         )
     except Exception as exc:
         await _persist_request_failed(db, req_id, actor, exc)
@@ -270,15 +270,6 @@ async def _process_single_request(
     )
     await db.flush()
     await db.commit()
-
-
-def _resolve_stored_path(stored_path: str) -> Path:
-    path = Path(stored_path)
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    if not path.exists():
-        raise FileNotFoundError(f"Uploaded file not found at path: {path}")
-    return path
 
 
 def _cell_str(value: object) -> str:
@@ -369,59 +360,46 @@ def _raise_if_errors(errors: list[str]) -> None:
         )
 
 
-def _parse_uploaded_file_from_path(path: Path, file_name: str) -> list[dict]:
-    """
-    Parse upload from disk. CSV and XLSX stream row-by-row (no full-sheet list).
-    Legacy .xls reads into memory once (openpyxl does not stream .xls reliably).
-    """
+def _parse_uploaded_file_from_bytes(data: bytes, file_name: str) -> list[dict]:
+    """Parse file body downloaded from Azure. CSV uses StringIO; Excel uses in-memory workbook."""
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     if ext == "csv":
-        return _parse_csv_path(path)
-    if ext == "xlsx":
-        return _parse_excel_path(path)
-    if ext == "xls":
-        return _parse_excel_from_bytes(path.read_bytes())
+        return _parse_csv_bytes(data)
+    if ext in ("xlsx", "xls"):
+        return _parse_excel_from_bytes(data)
     raise ValueError(f"Unsupported file extension: {ext}")
 
 
-def _parse_csv_path(path: Path) -> list[dict]:
+def _parse_csv_bytes(data: bytes) -> list[dict]:
     import csv
 
     errors: list[str] = []
     parsed: list[dict] = []
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        try:
-            ref = next(reader)
-            hdr = next(reader)
-        except StopIteration as exc:
+    text = data.decode("utf-8-sig")
+    reader = csv.reader(io.StringIO(text))
+    try:
+        ref = next(reader)
+        hdr = next(reader)
+    except StopIteration as exc:
+        raise ValueError(
+            "CSV must have reference row, header row, and at least one data row"
+        ) from exc
+    reference_row = [str(c) if c is not None else "" for c in ref]
+    header_row = [str(c) if c is not None else "" for c in hdr]
+    id_idx, type_idx, division_indices = _prepare_indices(reference_row, header_row)
+    for row_num, raw in enumerate(reader, start=1):
+        if row_num > MAX_BULK_APPLICABILITY_SCAN_ROWS:
             raise ValueError(
-                "CSV must have reference row, header row, and at least one data row"
-            ) from exc
-        reference_row = [str(c) if c is not None else "" for c in ref]
-        header_row = [str(c) if c is not None else "" for c in hdr]
-        id_idx, type_idx, division_indices = _prepare_indices(reference_row, header_row)
-        for row_num, raw in enumerate(reader, start=1):
-            if row_num > MAX_BULK_APPLICABILITY_SCAN_ROWS:
-                raise ValueError(
-                    f"Too many rows in file (max {MAX_BULK_APPLICABILITY_SCAN_ROWS} data rows)."
-                )
-            row = [str(c) if c is not None else "" for c in raw]
-            _append_parsed_row(row, row_num, id_idx, type_idx, division_indices, errors, parsed)
-            if len(parsed) > MAX_BULK_APPLICABILITY_DATA_ROWS:
-                raise ValueError(
-                    f"Too many non-empty data rows (max {MAX_BULK_APPLICABILITY_DATA_ROWS})."
-                )
+                f"Too many rows in file (max {MAX_BULK_APPLICABILITY_SCAN_ROWS} data rows)."
+            )
+        row = [str(c) if c is not None else "" for c in raw]
+        _append_parsed_row(row, row_num, id_idx, type_idx, division_indices, errors, parsed)
+        if len(parsed) > MAX_BULK_APPLICABILITY_DATA_ROWS:
+            raise ValueError(
+                f"Too many non-empty data rows (max {MAX_BULK_APPLICABILITY_DATA_ROWS})."
+            )
     _raise_if_errors(errors)
     return parsed
-
-
-def _parse_excel_path(path: Path) -> list[dict]:
-    wb = load_workbook(filename=str(path), read_only=True, data_only=True)
-    try:
-        return _consume_excel_rows(wb.active)
-    finally:
-        wb.close()
 
 
 def _parse_excel_from_bytes(file_bytes: bytes) -> list[dict]:

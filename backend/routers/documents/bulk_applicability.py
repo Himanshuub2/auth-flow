@@ -1,9 +1,6 @@
 import logging
 import os
-from pathlib import Path
 import uuid
-
-UPLOAD_CHUNK_BYTES = 1024 * 1024  # stream large files without holding full body in RAM
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -26,7 +23,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = frozenset({"xlsx", "csv", "xls"})
-LOCAL_UPLOAD_ROOT = Path("uploads") / "bulk-applicability"
+BLOB_PREFIX = "bulk-applicability"
+
+_CONTENT_TYPE_BY_EXT = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "csv": "text/csv; charset=utf-8",
+}
 
 
 def _get_extension(filename: str) -> str:
@@ -76,21 +79,19 @@ async def upload_bulk_file(
 
     slug = uuid.uuid4().hex[:12]
     safe_name = os.path.basename(file.filename)
-    relative_path = LOCAL_UPLOAD_ROOT / slug / safe_name
-    absolute_path = Path.cwd() / relative_path
-    absolute_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with absolute_path.open("wb") as out:
-        while True:
-            chunk = await file.read(UPLOAD_CHUNK_BYTES)
-            if not chunk:
-                break
-            out.write(chunk)
+    blob_path = f"{BLOB_PREFIX}/{slug}/{safe_name}"
+    storage = get_storage()
+    content_type = file.content_type or _CONTENT_TYPE_BY_EXT.get(ext)
+    try:
+        await storage.save(file, blob_path, content_type=content_type)
+    except Exception:
+        logger.exception("Azure upload failed for bulk applicability")
+        raise HTTPException(502, detail="Failed to upload file to blob storage.")
 
     req = await svc.create_upload_request(
         db,
         file_name=file.filename,
-        blob_path=str(relative_path).replace("\\", "/"),
+        blob_path=blob_path,
         selected_types=types_list,
         change_remarks=change_remarks,
         user_id=user.id,
@@ -147,7 +148,7 @@ async def get_history(
                 error=item.error_message,
                 change_remarks=item.change_remarks,
             ).model_dump()
-            
+
         ]
         return APIResponse(
             message="History fetched",

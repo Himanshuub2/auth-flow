@@ -20,5 +20,9 @@ class StorageBackend(ABC):
         """Delete a file by its stored path."""
 
     @abstractmethod
+    async def read_bytes(self, path: str) -> bytes:
+        """Read blob/object body by stored path (container-relative, no URL scheme)."""
+
+    @abstractmethod
     def get_url(self, path: str) -> str:
         """Convert a stored path to a public-facing URL."""
