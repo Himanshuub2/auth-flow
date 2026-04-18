@@ -94,6 +94,9 @@ async def upload_bulk_file(
         change_remarks=change_remarks,
         user_id=user.id,
     )
+    # Persist the PENDING row before processing so a processing rollback cannot
+    # remove this insert when force_start runs in the same request.
+    await db.commit()
 
     if force_start:
         try:

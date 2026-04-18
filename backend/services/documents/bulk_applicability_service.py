@@ -50,6 +50,20 @@ MAX_BULK_APPLICABILITY_SCAN_ROWS = 500_000
 _BULK_UPDATE_CHUNK = 500
 
 
+def _format_error_for_storage(exc: BaseException) -> str:
+    """User-readable text stored on BulkApplicabilityRequest.error_message."""
+    if isinstance(exc, ValueError) and "Validation errors" in str(exc):
+        return (
+            "The uploaded file has invalid or missing data. Ensure header row "
+            "includes 'id' and 'type', and each data row has values for 'id' and "
+            "'type' (division columns must be Y or N).\n\n"
+            f"{exc}"
+        )
+    if isinstance(exc, ValueError):
+        return f"File format or content error:\n{exc}"
+    return str(exc)
+
+
 async def generate_template(
     db: AsyncSession,
     selected_types: list[str],
@@ -167,6 +181,35 @@ async def process_pending_requests(db: AsyncSession, user_id: str | None = None)
     return {"processed": processed, "failed": failed, "total": len(requests)}
 
 
+async def _persist_request_failed(
+    db: AsyncSession,
+    req_id: int,
+    actor: str,
+    exc: BaseException,
+) -> None:
+    """Set FAILED + error_message and commit (caller must not have rolled back the request row)."""
+    err_text = _format_error_for_storage(exc)
+    await db.execute(
+        update(BulkApplicabilityRequest)
+        .where(BulkApplicabilityRequest.id == req_id)
+        .values(
+            status=BulkApplicabilityStatus.FAILED,
+            error_message=err_text,
+            updated_by=actor,
+        )
+    )
+    await db.flush()
+    await db.commit()
+    if isinstance(exc, ValueError):
+        logger.warning(
+            "Bulk applicability request %s failed validation: %s",
+            req_id,
+            err_text[:500],
+        )
+    else:
+        logger.exception("Bulk applicability request %s failed: %s", req_id, exc)
+
+
 async def _process_single_request(
     db: AsyncSession,
     req: BulkApplicabilityRequest,
@@ -174,6 +217,7 @@ async def _process_single_request(
 ) -> None:
     req_id = req.id
     actor = user_id or req.updated_by or req.created_by
+    updater = user_id or req.created_by
 
     await db.execute(
         update(BulkApplicabilityRequest)
@@ -185,36 +229,37 @@ async def _process_single_request(
     )
     await db.flush()
 
+    # Parse first. Do NOT session.rollback() here: if upload+process share one HTTP
+    # transaction, rollback would undo the new bulk_applicability row so UPDATE … FAILED
+    # would match 0 rows.
     try:
         path = _resolve_stored_path(req.uploaded_file_url)
-        # Parse in a worker thread so large CSV/XLSX work does not block the asyncio event loop.
-        parsed_rows = await asyncio.to_thread(_parse_uploaded_file_from_path, path, req.file_name)
-        await _apply_bulk_updates(db, parsed_rows, user_id or req.created_by)
-        await db.execute(
-            update(BulkApplicabilityRequest)
-            .where(BulkApplicabilityRequest.id == req_id)
-            .values(
-                status=BulkApplicabilityStatus.COMPLETED,
-                error_message=None,
-                updated_by=actor,
-            )
+        parsed_rows = await asyncio.to_thread(
+            _parse_uploaded_file_from_path, path, req.file_name
         )
-        await db.flush()
     except Exception as exc:
+        await _persist_request_failed(db, req_id, actor, exc)
+        return
+
+    try:
+        await _apply_bulk_updates(db, parsed_rows, updater)
+    except Exception as exc:
+        # Revert partial document/event updates only.
         await db.rollback()
-        await db.execute(
-            update(BulkApplicabilityRequest)
-            .where(BulkApplicabilityRequest.id == req_id)
-            .values(
-                status=BulkApplicabilityStatus.FAILED,
-                error_message=str(exc),
-                updated_by=actor,
-            )
+        await _persist_request_failed(db, req_id, actor, exc)
+        return
+
+    await db.execute(
+        update(BulkApplicabilityRequest)
+        .where(BulkApplicabilityRequest.id == req_id)
+        .values(
+            status=BulkApplicabilityStatus.COMPLETED,
+            error_message=None,
+            updated_by=actor,
         )
-        await db.flush()
-        logger.exception(
-            "Bulk applicability request %s failed: %s", req_id, exc
-        )
+    )
+    await db.flush()
+    await db.commit()
 
 
 def _resolve_stored_path(stored_path: str) -> Path:
@@ -301,7 +346,10 @@ def _append_parsed_row(
 
 def _raise_if_errors(errors: list[str]) -> None:
     if errors:
-        raise ValueError("Validation errors:\n" + "\n".join(errors))
+        lines = "\n".join(errors)
+        raise ValueError(
+            "Validation errors (fix each row/column, then re-upload):\n" + lines
+        )
 
 
 def _parse_uploaded_file_from_path(path: Path, file_name: str) -> list[dict]:
@@ -400,7 +448,10 @@ def _find_column(header: list[str], name: str) -> int:
     for i, h in enumerate(header):
         if h.lower() == name.lower():
             return i
-    raise ValueError(f"Required column '{name}' not found in header: {header}")
+    raise ValueError(
+        f"Required column '{name}' is missing from row 2 (header row). "
+        f"Use the downloaded template; found columns: {header}"
+    )
 
 
 
