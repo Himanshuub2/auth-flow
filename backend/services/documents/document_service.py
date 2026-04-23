@@ -452,9 +452,44 @@ HUB_MAX_PAGE_SIZE = 100
 
 
 def _apply_applicability_filter(query, user: CurrentUser, applicability: str | None):
-    """Filter hub/list queries by applicability. Uses JSONB @> where possible (GIN-friendly)."""
-    if not applicability or applicability.upper() == "ALL":
+    """Filter hub/list queries by applicability. Uses JSONB @> where possible (GIN-friendly).
+
+    - None (default): docs open to everyone (null refs) OR where the user's
+      email / designation / division_cluster appears in applicability_refs.
+    - "ALL": no filter — return everything (admin/explicit override).
+    - "DIVISION": ALL-type docs + DIVISION-type docs matching the user's cluster/designation.
+    - "EMPLOYEE": ALL-type docs + EMPLOYEE-type docs matching the user's email.
+    """
+    if applicability is not None and applicability.upper() == "ALL":
         return query
+
+    if applicability is None:
+        # Default hub view: include every document the current user is entitled to see.
+        conditions: list = [Document.applicability_refs.is_(None)]
+
+        # EMPLOYEE match — refs is a JSON array of email strings.
+        conditions.append(
+            (Document.applicability_type == ApplicabilityType.EMPLOYEE)
+            & Document.applicability_refs.contains([user.email])
+        )
+
+        # DIVISION match — refs is {"divisions": [...], "designations": [...]}.
+        div_conditions = []
+        if user.division_cluster:
+            div_conditions.append(
+                Document.applicability_refs.contains({"divisions": [user.division_cluster]})
+            )
+        if user.designation:
+            div_conditions.append(
+                Document.applicability_refs.contains({"designations": [user.designation]})
+            )
+        if div_conditions:
+            conditions.append(
+                (Document.applicability_type == ApplicabilityType.DIVISION)
+                & or_(*div_conditions)
+            )
+
+        return query.where(or_(*conditions))
 
     if applicability.upper() == "DIVISION":
         if not user.division_cluster:
@@ -470,7 +505,6 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
         )
 
     if applicability.upper() == "EMPLOYEE":
-        # Match user email as a JSON array element (same storage as division list).
         ref_match = Document.applicability_refs.contains([user.email])
         return query.where(
             or_(
