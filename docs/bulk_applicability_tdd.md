@@ -1,245 +1,330 @@
-## Bulk Applicability Module -- TDD & API Documentation
+## Bulk Applicability Module – TDD & API Documentation
 
-**Base URL:** `/``api``/`\
+**Base URL:** `/api`  
 **Auth:** All endpoints require `Authorization: Bearer <access_token>`.
+
+All JSON APIs follow the common envelope:
+`{ "message", "status_code", "status", "data" }`.
+
+---
 
 ## 1. MODULE OVERVIEW
 
 The Bulk Applicability module allows admins to:
 
--   Download an Excel template for selected types (document types +
-    events).
--   Upload a filled template for mass applicability updates.
--   Queue updates for **night-time processing** (off working hours) to
-    reduce DB load during business hours.
--   Track processing and errors from a single **history API**.
--   Update applicability in bulk for multiple documents and events using
-    one upload.
+- Download a template for selected types (document types + events).
+- Upload a filled file (`.xlsx`, `.xls`, `.csv`) for bulk applicability updates.
+- Queue processing through request rows with status tracking.
+- Process queued requests using a scheduled trigger or manual run.
+- Track success/failure with error details in history.
 
-This document is a simple Technical Design Document (TDD) covering
-features, APIs, flow, error handling, and schema at a high level.
+Applicability updates are written to:
 
-### 1.1 Small Use Case Summary
+- `documents.documents`
+- `events.events`
 
--   Admin wants to update applicability of many documents and events in
-    one go.
--   Admin downloads template, marks division applicability, uploads
-    file.
--   System processes at night and updates `applicability_refs` in target
-    tables.
+---
 
 ## 2. MAIN MODULE COMPONENTS
 
-### 2.1 Bulk Applicability Request
+### 2.1 Request Tracker
 
--   Stores one upload request as a durable DB record.
--   Tracks lifecycle status (`PENDING`, `IN_PROGRESS`, `COMPLETED`,
-    `FAILED`).
--   Stores upload file blob path and processing outputs (including error
-    message).
--   Supports dashboard table fields:
-    -   `id`
-    -   `updated_by`
-    -   `updated_on`
-    -   `status`
-    -   `bulk_upload` (`file_sas_url`)
-    -   `error` (`message`)
-    -   `change_remarks`
+Each upload creates one `bulk_applicability_requests` row:
 
-### 2.2 Template & Upload Files
+- `status`: `PENDING` -> `IN_PROGRESS` -> `COMPLETED` / `FAILED`
+- `uploaded_file_url`: blob path of uploaded file
+- `error_message`: validation/processing failure details
+- audit fields: `created_by`, `updated_by`, `created_at`, `updated_at`
 
--   uploaded files are stored in Azure Blob.
--   DB stores blob path/key; API returns SAS URL (`file_sas_url`) to UI.
--   Template uses only these columns: `id`, `name`, `type`,
-    `updated_on`, and division columns.
--   Division columns are generated from distinct `division_cluster`
-    values from the users table.
--   Only division applicability is updated from this template (no
-    designation columns in this version).
+### 2.2 Template and Parsing
 
-### 2.3 Night Scheduler (Cron)
+- Template has two top rows:
+  - Row 1: organization vertical reference values
+  - Row 2: headers (`id`, `type`, `name`, `updated_at`, division columns...)
+- Data starts from row 3.
+- Division columns accept only `Y` / `N` (also `YES` / `NO` supported).
+- If a row has no `Y/N` in division columns, it is ignored (no update).
 
--   Uses **Azure Function Timer Trigger** as cron scheduler.
--   Runs at configured night window (example: 01:00 local time).
--   Calls internal AKS processing API to process queued jobs.
--   Ensures heavy DB updates run after working hours.
+### 2.3 Processing
 
-### 2.4 Processor (AKS Backend)
+- Uploaded request is saved first as `PENDING`.
+- Processor reads file from blob, validates rows, resolves type (document/event), and applies batch updates.
+- On error, request is marked `FAILED` with user-readable message.
 
--   Downloads upload file from blob.
--   Parses and validates Excel rows.
--   Applies updates in a DB transaction.
--   Writes status + error message back to request table.
--   Builds applicability payload and writes it to `applicability_refs`
-    in:
-    -   `documents.documents` (schema: `documents`)
-    -   `events.events` (schema: `events`)
+---
 
-## 3. API LIST -- BULK APPLICABILITY
+## 3. API LIST – BULK APPLICABILITY
 
 ### 3.1 Bulk Applicability APIs
 
-+---------------+---------------------------+----+--------------------+
-| Function      | API                       | Me | > Role / Purpose   |
-|               |                           | th |                    |
-|               |                           | od |                    |
-+===============+===========================+====+====================+
-| Download      | `/``api``/bulk-applica    | PO | > Generate         |
-| Template      | bility/download-template` | ST | > template for     |
-|               |                           |    | > selected types   |
-|               |                           |    | > and  file   |
-|               |                           |    |     |
-+---------------+---------------------------+----+--------------------+
-| Upload Bulk   | `/``api``/b               | PO | > Upload `.xlsx`,csv,xls,  |
-| File          | ulk-applicability/upload` | ST | > create request   |
-|               |                           |    | > row as           |
-|               |                           |    | > `PENDING`,       |
-|               |                           |    | > return request   |
-|               |                           |    | > id. No heavy DB  |
-|               |                           |    | > update in this   |
-|               |                           |    | > request.         |
-+---------------+---------------------------+----+--------------------+
-| History       | `/``api``/bu              | G  | > Paginated        |
-|               | lk-applicability/history` | ET | > dashboard list   |
-|               |                           |    | > with status and  |
-|               |                           |    | > error field.     |
-+---------------+---------------------------+----+--------------------+
-| Internal      | `/``                      | PO | > Called by Azure  |
-| Night         | api``/internal/bulk-appli | ST | > Function cron to |
-| Processor     | cability/process-pending` |    | > process queued   |
-|               |                           |    | > records in       |
-|               |                           |    | > batch. Internal  |
-|               |                           |    | > use only.        |
-+---------------+---------------------------+----+--------------------+
+| Function | API | Method | Role / Purpose |
+|----------|-----|--------|----------------|
+| Download Template | `/api/bulk-applicability/download-template` | POST | Generate Excel template for selected types. |
+| Upload Bulk File | `/api/bulk-applicability/upload` | POST | Upload file, create `PENDING` request, optionally start processing immediately. |
+| History | `/api/bulk-applicability/history` | GET | Fetch paginated request history or single request details by id. |
+| Process Pending | `/api/bulk-applicability/process-pending` | POST | Process all `PENDING` requests. Used by scheduler and can be triggered manually. |
 
-### 3.2 History API Response Contract (Dashboard)
+---
 
-History table row fields returned by API:
+## 4. API DETAILS (PAYLOAD & RESPONSE)
 
--   `id`: Request id (or display id)
--   `updated_by`: User name/id who last updated the request
--   `updated_on`: Last updated timestamp
--   `status`: `PENDING` / `IN_PROGRESS` / `COMPLETED` / `FAILED`
--   `bulk_upload`: `file_name` and when user click send the url 
--   `error`: processing error message (null when success)
--   `change_remarks`: optional remarks for this bulk request
+### 4.1 Download Template
 
-Example `data.items[]`:
+**Endpoint:** `POST /api/bulk-applicability/download-template`  
+**Content-Type:** `application/json`  
+**Response Type:** File stream (`.xlsx`)
 
+**Request payload**
+
+```json
+{
+  "selected_types": ["POLICY", "EWS", "EVENTS"]
+}
+```
+
+**Rules**
+
+- `selected_types` is required.
+- Allowed values are all document enum values plus `EVENTS`.
+- Returns streamed Excel file with filename like:
+  `bulk_applicability_template_policy_ews_events.xlsx`.
+
+**Success response**
+
+- `200 OK` with file stream and header:
+  `Content-Disposition: attachment; filename="<generated-name>.xlsx"`.
+
+**Validation error example**
+
+```json
+{
+  "detail": [
     {
-      "id": "0042",
-      "updated_by": "username",
-      "updated_on": "2026-04-10",
-      "status": "FAILED",
-      "bulk_upload": "file_name.xlsx",
-      "error": "Row 23: Invalid value 'X' in column HR. Allowed values: Y/N.",
-      "change_remarks": "April applicability correction"
+      "type": "value_error",
+      "loc": ["body", "selected_types"],
+      "msg": "Invalid type(s): ['ABC']. Allowed: [...]"
     }
+  ]
+}
+```
 
-## 4. ORCHESTRATION FLOWS -- BULK APPLICABILITY
+---
 
-### 4.1 Upload and Queue (Day-time)
+### 4.2 Upload Bulk File
 
-1.  Admin uploads Excel using `POST /api/bulk-applicability/upload`.
-2.  Backend validates file extension and stores file in Azure Blob.
-3.  Backend inserts request row with:
-    -   `status = PENDING`
-    -   upload blob path
-    -   `change_remarks`
-    -   audit fields (`created_by`, `updated_by`)
-4.  Backend returns `202 Accepted` with request id.
-5.  No heavy update is executed in this request.
+**Endpoint:** `POST /api/bulk-applicability/upload`  
+**Content-Type:** `multipart/form-data`
 
-### 4.2 Night Processing via Cron (Off-hours)
+**Form payload**
 
-1.  Azure Function timer runs on schedule (example: 01:00 daily).
-2.  Function calls internal API:
-    `POST /api/internal/bulk-applicability/process-pending`.
-3.  Backend picks `PENDING` records (ordered by creation time).
-4.  For each record:
-    -   mark `IN_PROGRESS`
-    -   download blob file
-    -   parse and validate all rows
-    -   prepare applicability payload from division columns
-    -   apply updates in one transaction to `documents.documents` and
-        `events.events`
-    -   set `COMPLETED` or `FAILED` with `error`
-5.  Admin checks status/error from
-    `GET /api/bulk-applicability/history`.
+- `file` (required): `.xlsx` / `.xls` / `.csv`
+- `selected_types` (optional): comma-separated string like `POLICY,EWS,EVENTS`
+- `change_remarks` (optional): text
+- `force_start` (optional): boolean, default `false`
 
-### 4.3 Failure Scenarios
+**Example request (form-data)**
 
--   **Template/upload format error**: request marked `FAILED`; error
-    message saved in `error`.
--   **Validation error (row/column)**: transaction not applied; request
-    marked `FAILED`.
--   **DB exception during update**: full rollback and mark `FAILED` with
-    sanitized error message.
--   **Function unable to call AKS internal API**: records stay
-    `PENDING`; next cron run retries.
--   **Pod restart while processing**: stale `IN_PROGRESS` can be
-    recovered by nightly retry rule (age threshold + safe requeue
-    strategy).
+```text
+file=<bulk_upload.xlsx>
+selected_types=POLICY,EWS,EVENTS
+change_remarks=April applicability update
+force_start=false
+```
 
-### 4.4 Rollback Rule (All-or-Nothing)
+**Success response (`202 Accepted`)**
 
--   Processing runs in a single DB transaction for one uploaded file.
--   If any record fails, the whole transaction is rolled back.
--   No partial update is kept for that upload.
+```json
+{
+  "message": "File uploaded successfully. Processing queued.",
+  "status_code": 202,
+  "status": "success",
+  "data": {
+    "request_id": 42,
+    "message": "Processing queued"
+  }
+}
+```
 
-## 5. DB SCHEMA -- BULK APPLICABILITY
+If `force_start=true`, message becomes:
 
-High-level schema for request tracking table.
+- top-level `message`: `"File uploaded and processing started."`
+- `data.message`: `"Processing started"`
 
-### 5.1 bulk_applicability_requests
+**Error response examples**
 
-  -----------------------------------------------------------------------
-  Column                    Type / Notes
-  ------------------------- ---------------------------------------------
-  id                        Integer, PK, autoincrement
-  file_name                 String, file name
+Invalid extension:
 
+```json
+{
+  "detail": "Invalid file extension '.txt'. Allowed: csv, xls, xlsx"
+}
+```
 
-  uploaded_file_url         String, blob path/key for uploaded file
+Blob upload failure:
 
-  selected_types            JSON/JSONB list
+```json
+{
+  "detail": "Failed to upload file to blob storage."
+}
+```
 
-  status                    Enum: `PENDING`, `IN_PROGRESS`, `COMPLETED`,
-                            `FAILED`
+---
 
+### 4.3 History
 
-  error_message             Text, nullable (used as `error` in history
-                            UI)
+**Endpoint:** `GET /api/bulk-applicability/history`
 
-  change_remarks            Text, nullable
+**Query params**
 
-  created_by                FK user identifier
+- `page` (default `1`, min `1`)
+- `page_size` (default `10`, min `1`, max `100`)
+- `request_id` (optional): return only one request with `file_sas_url`
 
-  updated_by                FK user identifier
+#### A) Paginated history response
 
-  created_at                Timestamp with time zone
+`GET /api/bulk-applicability/history?page=1&page_size=10`
 
-  updated_at                Timestamp with time zone
-  -----------------------------------------------------------------------
+```json
+{
+  "message": "History fetched",
+  "status_code": 200,
+  "status": "success",
+  "data": [
+    {
+      "id": 42,
+      "updated_by": "A12345",
+      "updated_on": "2026-04-20T05:30:00Z",
+      "status": "FAILED",
+      "file_name": "bulk_upload.xlsx",
+      "file_sas_url": null,
+      "error": "Validation errors (fix each row/column, then re-upload): ...",
+      "change_remarks": "April applicability update"
+    }
+  ],
+  "total": 12,
+  "page": 1,
+  "page_size": 10
+}
+```
+
+#### B) Single request response
+
+`GET /api/bulk-applicability/history?request_id=42`
+
+```json
+{
+  "message": "History fetched",
+  "status_code": 200,
+  "status": "success",
+  "data": {
+    "id": 42,
+    "updated_by": "A12345",
+    "updated_on": "2026-04-20T05:30:00Z",
+    "status": "COMPLETED",
+    "file_name": "bulk_upload.xlsx",
+    "file_sas_url": "https://<storage>/<container>/...<sas-token>",
+    "error": null,
+    "change_remarks": "April applicability update"
+  }
+}
+```
+
+Not found (`404`):
+
+```json
+{
+  "detail": "Bulk applicability request not found"
+}
+```
+
+---
+
+### 4.4 Process Pending
+
+**Endpoint:** `POST /api/bulk-applicability/process-pending`  
+**Purpose:** Process all requests currently in `PENDING`.
+
+**Request payload**
+
+- No request body.
+
+**Success response (`200 OK`)**
+
+```json
+{
+  "message": "Processing complete",
+  "status_code": 200,
+  "status": "success",
+  "data": {
+    "processed": 3,
+    "failed": 1,
+    "total": 4
+  }
+}
+```
+
+---
+
+## 5. ORCHESTRATION FLOW
+
+### 5.1 Upload and Queue
+
+1. Admin uploads file to `/api/bulk-applicability/upload`.
+2. Backend validates extension and uploads file to blob.
+3. Backend creates request row as `PENDING`.
+4. Response returns `request_id` with `202 Accepted`.
+
+### 5.2 Processing
+
+1. Scheduler or admin triggers `/api/bulk-applicability/process-pending`.
+2. Service picks all `PENDING` requests in created order.
+3. For each request:
+   - set `IN_PROGRESS`
+   - download and parse file
+   - validate rows and IDs
+   - batch update document/event applicability
+   - set `COMPLETED` or `FAILED`
+
+### 5.3 Failure Behavior
+
+- Bad structure/content -> `FAILED` with clear validation message.
+- Missing IDs in DB -> `FAILED`.
+- DB update error -> update transaction rolled back, request marked `FAILED`.
+
+---
+
+## 6. DB SCHEMA – BULK APPLICABILITY REQUESTS
+
+### 6.1 `documents.bulk_applicability_requests`
+
+| Column | Type / Notes |
+|--------|--------------|
+| `id` | Integer, PK, autoincrement |
+| `file_name` | String(255), required |
+| `uploaded_file_url` | String(500), required (blob path/key) |
+| `selected_types` | JSONB list, required |
+| `status` | Enum: `PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED` |
+| `error_message` | Text, nullable |
+| `change_remarks` | Text, nullable |
+| `created_by` | FK `users.users.staff_id`, required |
+| `updated_by` | FK `users.users.staff_id`, nullable |
+| `created_at` | Timestamp with timezone |
+| `updated_at` | Timestamp with timezone |
 
 Recommended indexes:
 
--   `(status, created_at)` for cron pickup.
--   `(updated_at)` for history sorting.
--   `(id)` unique for UI lookup.
+- `(status, created_at)` for pending pickup.
+- `(updated_at)` for history sorting.
 
-## 6. NON-FUNCTIONAL NOTES
+---
 
--   Heavy DB updates are intentionally moved to night schedule to reduce
-    business-hour impact.
--   Keep processor idempotent and status-driven
-    (`PENDING -> IN_PROGRESS -> terminal`) to avoid duplicate execution.
--   Internal processor API should be private/authenticated (Function
-    identity or API key).
--   Keep errors concise for UI (`error` string), while detailed logs
-    remain in server logs.
--   Runtime stack for this use case:
-    -   PostgreSQL for request tracking and applicability updates
-    -   Azure Functions (timer/cron) for night trigger
-    -   AKS backend service for processing, validation, and DB write
-        execution
+## 7. Notes
+
+- Allowed upload formats: `xlsx`, `xls`, `csv`.
+- Row updates support both document types and events in one file.
+- Division `Y` values map to:
+  - `applicability_type = DIVISION`
+  - `applicability_refs = { "divisions": [...], "designations": [] }`
+- No selected division (`all N`) maps to:
+  - `applicability_type = ALL`
+  - `applicability_refs = null`

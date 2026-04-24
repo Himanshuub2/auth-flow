@@ -540,9 +540,13 @@ def _write_reference_row(
     division_columns: list[tuple[str, str]],
 ) -> None:
     """
-    Row 1: organization_vertical reference (user guidance only).
-    Fixed columns are left blank on this row.
+    Row 1: user guidance + organization_vertical reference.
     """
+    ws.cell(
+        row=1,
+        column=1,
+        value="User input rule: In division columns, enter only Y, N, or leave blank.",
+    )
     for col_idx, (organization_vertical, _division_cluster) in enumerate(
         division_columns, start=len(FIXED_COLUMNS) + 1
     ):
@@ -585,11 +589,15 @@ def _apply_styles(
 
     # Row 1 is reference-only; highlight differently.
     reference_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-    for col_idx in range(len(FIXED_COLUMNS) + 1, total_cols + 1):
+    for col_idx in range(1, total_cols + 1):
         ref_cell = ws.cell(row=1, column=col_idx)
-        ref_cell.font = Font(bold=True, size=10)
+        if col_idx <= len(FIXED_COLUMNS):
+            ref_cell.font = Font(bold=True, size=10)
+            ref_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        else:
+            ref_cell.font = Font(bold=True, size=10)
+            ref_cell.alignment = header_alignment
         ref_cell.fill = reference_fill
-        ref_cell.alignment = header_alignment
 
     for col_idx in range(1, total_cols + 1):
         cell = ws.cell(row=2, column=col_idx)

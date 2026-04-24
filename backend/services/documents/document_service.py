@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import String as SAString, func, or_, select
+from sqlalchemy import String as SAString, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
@@ -454,8 +454,8 @@ HUB_MAX_PAGE_SIZE = 100
 def _apply_applicability_filter(query, user: CurrentUser, applicability: str | None):
     """Filter hub/list queries by applicability. Uses JSONB @> where possible (GIN-friendly).
 
-    - None (default): docs open to everyone (null refs) OR where the user's
-      email / designation / division_cluster appears in applicability_refs.
+    - None (default): applicability ALL, or applicability_refs SQL/JSON null, or docs
+      where the user's email / designation / division_cluster appears in applicability_refs.
     - "ALL": no filter — return everything (admin/explicit override).
     - "DIVISION": ALL-type docs + DIVISION-type docs matching the user's cluster/designation.
     - "EMPLOYEE": ALL-type docs + EMPLOYEE-type docs matching the user's email.
@@ -464,14 +464,22 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
         return query
 
     if applicability is None:
-        # Default hub view: include every document the current user is entitled to see.
-        conditions: list = [Document.applicability_refs.is_(None)]
+        # Default hub view: open-to-everyone docs (ALL / missing refs) plus targeted matches.
+        # JSONB may be SQL NULL or the JSON null value ('null'::jsonb); both mean "no refs".
+        refs_open = or_(
+            Document.applicability_refs.is_(None),
+            Document.applicability_refs == literal_column("'null'::jsonb"),
+        )
+        conditions: list = [
+            or_(refs_open, Document.applicability_type == ApplicabilityType.ALL),
+        ]
 
         # EMPLOYEE match — refs is a JSON array of email strings.
-        conditions.append(
-            (Document.applicability_type == ApplicabilityType.EMPLOYEE)
-            & Document.applicability_refs.contains([user.email])
-        )
+        if user.email:
+            conditions.append(
+                (Document.applicability_type == ApplicabilityType.EMPLOYEE)
+                & Document.applicability_refs.contains([user.email])
+            )
 
         # DIVISION match — refs is {"divisions": [...], "designations": [...]}.
         div_conditions = []
@@ -632,6 +640,11 @@ async def get_document_hub(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"page_size must be between 1 and {HUB_MAX_PAGE_SIZE}",
         )
+
+    if applicability is not None:
+        applicability = applicability.strip()
+        if not applicability:
+            applicability = None
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=HUB_NEW_DAYS)
 
