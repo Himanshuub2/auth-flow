@@ -607,8 +607,8 @@ async def _sync_media_from_metadata(
     Sync EventMediaItem rows from FE-provided file_metadata (blob paths).
     - Creates new rows for new blob_paths.
     - Updates caption/description/thumbnail on existing rows.
-    - When selected_filenames is provided, sets staging_file_ids to exactly match that list.
-      Existing DB files are retained if their names are selected.
+    - When selected_filenames is provided, keeps those existing files and also includes
+      all files represented by file_metadata (new uploads or existing-by-blob-path).
     - Otherwise sets staging_file_ids to match metadata list order.
     """
     existing_files = await _get_all_files(db, event.id)
@@ -654,18 +654,24 @@ async def _sync_media_from_metadata(
         return
 
     desired_staging_ids: list[int] = []
+    seen_ids: set[int] = set()
     used_existing_ids: set[int] = set()
 
     for filename in selected_filenames:
         metadata_ids = metadata_ids_by_name.get(filename) or []
         if metadata_ids:
-            desired_staging_ids.append(metadata_ids.pop(0))
+            selected_id = metadata_ids.pop(0)
+            if selected_id not in seen_ids:
+                desired_staging_ids.append(selected_id)
+                seen_ids.add(selected_id)
             continue
 
         existing_matches = existing_by_name.get(filename) or []
         selected_existing_id = next((f.id for f in existing_matches if f.id not in used_existing_ids), None)
         if selected_existing_id is not None:
-            desired_staging_ids.append(selected_existing_id)
+            if selected_existing_id not in seen_ids:
+                desired_staging_ids.append(selected_existing_id)
+                seen_ids.add(selected_existing_id)
             used_existing_ids.add(selected_existing_id)
             continue
 
@@ -673,6 +679,11 @@ async def _sync_media_from_metadata(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"selected_filenames contains unknown file: {filename}",
         )
+
+    for media_id in new_staging_ids:
+        if media_id not in seen_ids:
+            desired_staging_ids.append(media_id)
+            seen_ids.add(media_id)
 
     event.staging_file_ids = desired_staging_ids
     logger.debug("Synced %d media items for event %s from metadata", len(file_metadata), event.id)
