@@ -453,7 +453,14 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
 
 
 async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
-    parent = await get_event(db, draft.replaces_document_id)
+    result = await db.execute(
+        select(Event)
+        .where(Event.id == draft.replaces_document_id)
+        .options(selectinload(Event.revisions))
+    )
+    parent = result.scalar_one_or_none()
+    if not parent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent event not found")
 
     last_rev = _find_latest_revision(parent)
     if not last_rev:
@@ -605,17 +612,20 @@ async def _sync_media_from_metadata(
 ) -> None:
     """
     Sync EventMediaItem rows from FE-provided file_metadata (blob paths).
-    - Creates new rows for new blob_paths.
-    - Updates caption/description/thumbnail on existing rows.
-    - When selected_file_ids is provided, keeps those existing files (by ID) and also
-      includes all files created/updated from file_metadata.
-    - Otherwise sets staging_file_ids to match metadata list order.
+
+    **Create** (selected_file_ids is None):
+        staging = all file_metadata items (new rows created from blob paths).
+
+    **Update** (selected_file_ids provided):
+        staging = selected_file_ids (existing files to keep)
+                + all files referenced by file_metadata.
+        This means metadata can append files even when selected_file_ids is empty.
     """
     existing_files = await _get_all_files(db, event.id)
     existing_by_path = {f.file_url: f for f in existing_files}
     existing_id_set = {f.id for f in existing_files}
 
-    metadata_staging_ids: list[int] = []
+    all_metadata_ids: list[int] = []
 
     for idx, meta in enumerate(file_metadata):
         existing = existing_by_path.get(meta.blob_path)
@@ -625,7 +635,7 @@ async def _sync_media_from_metadata(
             existing.sort_order = meta.sort_order if meta.sort_order else idx
             if meta.thumbnail_blob_path is not None:
                 existing.thumbnail_url = meta.thumbnail_blob_path
-            metadata_staging_ids.append(existing.id)
+            all_metadata_ids.append(existing.id)
         else:
             item = EventMediaItem(
                 event_id=event.id,
@@ -640,10 +650,10 @@ async def _sync_media_from_metadata(
             )
             db.add(item)
             await db.flush()
-            metadata_staging_ids.append(item.id)
+            all_metadata_ids.append(item.id)
 
     if selected_file_ids is None:
-        event.staging_file_ids = metadata_staging_ids
+        event.staging_file_ids = all_metadata_ids
         logger.debug("Synced %d media items for event %s from metadata", len(file_metadata), event.id)
         return
 
@@ -655,13 +665,13 @@ async def _sync_media_from_metadata(
             desired_staging_ids.append(fid)
             seen_ids.add(fid)
 
-    for media_id in metadata_staging_ids:
-        if media_id not in seen_ids:
-            desired_staging_ids.append(media_id)
-            seen_ids.add(media_id)
+    for fid in all_metadata_ids:
+        if fid not in seen_ids:
+            desired_staging_ids.append(fid)
+            seen_ids.add(fid)
 
     event.staging_file_ids = desired_staging_ids
-    logger.debug("Synced %d media items for event %s from metadata", len(file_metadata), event.id)
+    logger.debug("Synced %d media items for event %s (kept + metadata)", len(desired_staging_ids), event.id)
 
 
 async def _validate_active_event_name_uniqueness(
