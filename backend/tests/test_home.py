@@ -47,7 +47,7 @@ def _document_payload(
         "applicability_type": "ALL",
         "applicability_refs": None,
         "status": status.value,
-        "selected_filenames": None,
+        "selected_file_ids": None,
         "change_remarks": "initial publish" if status == DocumentStatus.ACTIVE else None,
     }
     data.update(kwargs)

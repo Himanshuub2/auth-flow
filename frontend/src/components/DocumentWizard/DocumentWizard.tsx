@@ -198,11 +198,9 @@ export default function DocumentWizard({ editDoc, onClose, onSaved, setEditDoc }
     if (editDoc?.status === "ACTIVE" && !form.change_remarks.trim() && status === "ACTIVE") { setError("Change remarks required for editing"); return; }
 
     const keptExisting = (editDoc?.files ?? []).filter((f) => !removedExistingIds.includes(f.id));
-    const existingFilenames = keptExisting.map((f) => f.original_filename);
-    const newFilenames = files.map((f) => f.name);
-    const allFilenames = [...new Set([...existingFilenames, ...newFilenames])];
+    const keptExistingIds = keptExisting.map((f) => f.id);
 
-    if (status === "ACTIVE" && allFilenames.length === 0 && files.length === 0) {
+    if (status === "ACTIVE" && keptExistingIds.length === 0 && files.length === 0) {
       setError("At least 1 file required to publish");
       return;
     }

@@ -117,15 +117,13 @@ async def save_document(
     doc.change_remarks = payload.change_remarks
 
     uploaded_ids: list[int] = []
-    uploaded_names: list[str] = []
     if files:
         uploaded = await upload_document_files(db, doc.id, payload.document_type, files)
         uploaded_ids = [f.id for f in uploaded]
-        uploaded_names = [f.original_filename for f in uploaded]
 
-    if payload.selected_filenames is not None:
-        all_names = list(dict.fromkeys([*payload.selected_filenames, *uploaded_names]))
-        await _sync_staging(db, doc, all_names)
+    if payload.selected_file_ids is not None:
+        all_ids = list(dict.fromkeys([*payload.selected_file_ids, *uploaded_ids]))
+        await _sync_staging(db, doc, all_ids)
     elif uploaded_ids:
         existing_staging = list(doc.staging_file_ids or [])
         for fid in uploaded_ids:
@@ -1237,15 +1235,15 @@ async def _files_differ_between(
 
 
 async def _sync_staging(
-    db: AsyncSession, doc: Document, selected_names: list[str],
+    db: AsyncSession, doc: Document, selected_ids: list[int],
 ) -> None:
-    """Make staging match exactly the selected filenames."""
-    desired = set(selected_names)
+    """Make staging match exactly the selected file IDs."""
     all_files = await _get_all_files(db, doc.id)
-    name_to_file = {f.original_filename: f for f in all_files}
+    valid_ids = {f.id for f in all_files}
     new_staging: list[int] = []
-    for name in selected_names:
-        f = name_to_file.get(name)
-        if f:
-            new_staging.append(f.id)
+    seen: set[int] = set()
+    for fid in selected_ids:
+        if fid in valid_ids and fid not in seen:
+            new_staging.append(fid)
+            seen.add(fid)
     doc.staging_file_ids = new_staging

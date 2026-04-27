@@ -93,7 +93,7 @@ def test_get_item_detail_document(client: TestClient) -> None:
         "applicability_type": "ALL",
         "applicability_refs": None,
         "status": DocumentStatus.DRAFT.value,
-        "selected_filenames": None,
+        "selected_file_ids": None,
         "change_remarks": None,
     }
     create = client.post("/api/documents/", data={"data": json.dumps(payload)})
@@ -171,7 +171,7 @@ def test_item_revisions_document(client: TestClient) -> None:
         "applicability_type": "ALL",
         "applicability_refs": None,
         "status": DocumentStatus.DRAFT.value,
-        "selected_filenames": None,
+        "selected_file_ids": None,
         "change_remarks": None,
     }
     create = client.post("/api/documents/", data={"data": json.dumps(payload)})

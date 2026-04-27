@@ -26,7 +26,7 @@ class DocumentSavePayload(BaseModel):
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
     applicability_refs: dict | list | None = None
     status: DocumentStatus = DocumentStatus.DRAFT
-    selected_filenames: list[str] | None = None
+    selected_file_ids: list[int] | None = None
     change_remarks: str | None = None
 
     @field_validator("tags")

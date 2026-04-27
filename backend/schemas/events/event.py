@@ -27,7 +27,7 @@ class EventSavePayload(BaseModel):
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
     applicability_refs: dict | list | None = None
     status: EventStatus = EventStatus.DRAFT
-    selected_filenames: list[str] | None = None
+    selected_file_ids: list[int] | None = None
     file_metadata: list[FileMetadataIn] | None = None
     change_remarks: str | None = None
 

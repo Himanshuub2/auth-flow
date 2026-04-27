@@ -60,12 +60,12 @@ async def save_event(
     event.applicability_refs = payload.applicability_refs
     event.change_remarks = payload.change_remarks
 
-    if payload.selected_filenames is not None:
+    if payload.selected_file_ids is not None:
         await _sync_media_from_metadata(
             db,
             event,
             payload.file_metadata or [],
-            selected_filenames=payload.selected_filenames,
+            selected_file_ids=payload.selected_file_ids,
         )
     elif payload.file_metadata is not None:
         await _sync_media_from_metadata(db, event, payload.file_metadata)
@@ -601,24 +601,21 @@ async def _sync_media_from_metadata(
     event: Event,
     file_metadata: list[FileMetadataIn],
     *,
-    selected_filenames: list[str] | None = None,
+    selected_file_ids: list[int] | None = None,
 ) -> None:
     """
     Sync EventMediaItem rows from FE-provided file_metadata (blob paths).
     - Creates new rows for new blob_paths.
     - Updates caption/description/thumbnail on existing rows.
-    - When selected_filenames is provided, keeps those existing files and also includes
-      all files represented by file_metadata (new uploads or existing-by-blob-path).
+    - When selected_file_ids is provided, keeps those existing files (by ID) and also
+      includes all files created/updated from file_metadata.
     - Otherwise sets staging_file_ids to match metadata list order.
     """
     existing_files = await _get_all_files(db, event.id)
     existing_by_path = {f.file_url: f for f in existing_files}
-    existing_by_name: dict[str, list[EventMediaItem]] = {}
-    for f in existing_files:
-        existing_by_name.setdefault(f.original_filename, []).append(f)
+    existing_id_set = {f.id for f in existing_files}
 
-    new_staging_ids: list[int] = []
-    metadata_ids_by_name: dict[str, list[int]] = {}
+    metadata_staging_ids: list[int] = []
 
     for idx, meta in enumerate(file_metadata):
         existing = existing_by_path.get(meta.blob_path)
@@ -628,8 +625,7 @@ async def _sync_media_from_metadata(
             existing.sort_order = meta.sort_order if meta.sort_order else idx
             if meta.thumbnail_blob_path is not None:
                 existing.thumbnail_url = meta.thumbnail_blob_path
-            new_staging_ids.append(existing.id)
-            metadata_ids_by_name.setdefault(meta.original_filename, []).append(existing.id)
+            metadata_staging_ids.append(existing.id)
         else:
             item = EventMediaItem(
                 event_id=event.id,
@@ -644,43 +640,22 @@ async def _sync_media_from_metadata(
             )
             db.add(item)
             await db.flush()
-            new_staging_ids.append(item.id)
-            metadata_ids_by_name.setdefault(meta.original_filename, []).append(item.id)
-            existing_by_name.setdefault(item.original_filename, []).append(item)
+            metadata_staging_ids.append(item.id)
 
-    if selected_filenames is None:
-        event.staging_file_ids = new_staging_ids
+    if selected_file_ids is None:
+        event.staging_file_ids = metadata_staging_ids
         logger.debug("Synced %d media items for event %s from metadata", len(file_metadata), event.id)
         return
 
     desired_staging_ids: list[int] = []
     seen_ids: set[int] = set()
-    used_existing_ids: set[int] = set()
 
-    for filename in selected_filenames:
-        metadata_ids = metadata_ids_by_name.get(filename) or []
-        if metadata_ids:
-            selected_id = metadata_ids.pop(0)
-            if selected_id not in seen_ids:
-                desired_staging_ids.append(selected_id)
-                seen_ids.add(selected_id)
-            continue
+    for fid in selected_file_ids:
+        if fid in existing_id_set and fid not in seen_ids:
+            desired_staging_ids.append(fid)
+            seen_ids.add(fid)
 
-        existing_matches = existing_by_name.get(filename) or []
-        selected_existing_id = next((f.id for f in existing_matches if f.id not in used_existing_ids), None)
-        if selected_existing_id is not None:
-            if selected_existing_id not in seen_ids:
-                desired_staging_ids.append(selected_existing_id)
-                seen_ids.add(selected_existing_id)
-            used_existing_ids.add(selected_existing_id)
-            continue
-
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"selected_filenames contains unknown file: {filename}",
-        )
-
-    for media_id in new_staging_ids:
+    for media_id in metadata_staging_ids:
         if media_id not in seen_ids:
             desired_staging_ids.append(media_id)
             seen_ids.add(media_id)
