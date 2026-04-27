@@ -31,6 +31,7 @@ from schemas.documents.document import (
     LinkedDocumentDetail,
 )
 from services.documents.document_file_service import (
+    MAX_FILES,
     upload_document_files,
     validate_file_count,
 )
@@ -118,6 +119,21 @@ async def save_document(
 
     uploaded_ids: list[int] = []
     if files:
+        # Count files that will survive after this save, then add the new ones.
+        if payload.selected_file_ids is not None:
+            kept_count = len(set(payload.selected_file_ids))
+        else:
+            kept_count = len(doc.staging_file_ids or [])
+
+        max_total = 1 if payload.document_type == DocumentType.FAQ else MAX_FILES
+        if kept_count + len(files) > max_total:
+            detail = (
+                "FAQ documents can only have 1 file"
+                if payload.document_type == DocumentType.FAQ
+                else f"Maximum {MAX_FILES} files allowed"
+            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
         uploaded = await upload_document_files(db, doc.id, payload.document_type, files)
         uploaded_ids = [f.id for f in uploaded]
 

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from models.events.event import Event, EventRevision, EventStatus
-from models.events.event_media_item import EventMediaItem
+from models.events.event_media_item import EventMediaItem, FileType
 from models.events.user import User
 from schemas.events.event import (
     EventListItemOut,
@@ -22,6 +22,13 @@ from utils.applicability import validate_applicability_refs
 logger = logging.getLogger(__name__)
 
 PREVIEW_MEDIA_LIMIT = 6
+
+# Per-event media limits
+MAX_EVENT_IMAGES = 50
+MAX_EVENT_VIDEOS = 8
+MAX_EVENT_THUMBNAILS = 8
+MAX_EVENT_IMAGE_SIZE_BYTES = 10 * 1024 * 1024    # 10 MB
+MAX_EVENT_VIDEO_SIZE_BYTES = 500 * 1024 * 1024   # 500 MB
 
 
 async def save_event(
@@ -603,6 +610,72 @@ async def _files_differ_between(
     return names_a != names_b
 
 
+def _validate_event_media_limits(
+    file_metadata: list[FileMetadataIn],
+    existing_files: list[EventMediaItem],
+    selected_file_ids: list[int] | None,
+) -> None:
+    """
+    Validate per-event media limits before any rows are created.
+    Counts are computed across the final staging set:
+      kept existing files (selected_file_ids) + all files from file_metadata (de-duplicated).
+    """
+    existing_by_path = {f.file_url: f for f in existing_files}
+    existing_id_set = {f.id for f in existing_files}
+
+    # Build the set of existing IDs that will be in final staging.
+    kept_ids: set[int] = set()
+    if selected_file_ids is not None:
+        kept_ids = {fid for fid in selected_file_ids if fid in existing_id_set}
+    # Existing files matched via metadata blob path are also included.
+    for meta in file_metadata:
+        if meta.blob_path in existing_by_path:
+            kept_ids.add(existing_by_path[meta.blob_path].id)
+
+    kept_files = [f for f in existing_files if f.id in kept_ids]
+
+    # Separate truly new files (no existing row for this blob path).
+    new_meta = [m for m in file_metadata if m.blob_path not in existing_by_path]
+
+    total_images = sum(1 for f in kept_files if f.file_type == FileType.IMAGE)
+    total_videos = sum(1 for f in kept_files if f.file_type == FileType.VIDEO)
+    total_thumbnails = sum(1 for f in kept_files if f.thumbnail_url)
+
+    for meta in new_meta:
+        if meta.file_type == FileType.IMAGE:
+            total_images += 1
+            if meta.file_size_bytes > MAX_EVENT_IMAGE_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Image '{meta.original_filename}' exceeds the {MAX_EVENT_IMAGE_SIZE_BYTES // (1024 * 1024)}MB limit",
+                )
+        elif meta.file_type == FileType.VIDEO:
+            total_videos += 1
+            if meta.file_size_bytes > MAX_EVENT_VIDEO_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Video '{meta.original_filename}' exceeds the {MAX_EVENT_VIDEO_SIZE_BYTES // (1024 * 1024)}MB limit",
+                )
+        if meta.thumbnail_blob_path:
+            total_thumbnails += 1
+
+    if total_images > MAX_EVENT_IMAGES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {MAX_EVENT_IMAGES} images allowed per event",
+        )
+    if total_videos > MAX_EVENT_VIDEOS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {MAX_EVENT_VIDEOS} videos allowed per event",
+        )
+    if total_thumbnails > MAX_EVENT_THUMBNAILS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {MAX_EVENT_THUMBNAILS} thumbnails allowed per event",
+        )
+
+
 async def _sync_media_from_metadata(
     db: AsyncSession,
     event: Event,
@@ -624,6 +697,8 @@ async def _sync_media_from_metadata(
     existing_files = await _get_all_files(db, event.id)
     existing_by_path = {f.file_url: f for f in existing_files}
     existing_id_set = {f.id for f in existing_files}
+
+    _validate_event_media_limits(file_metadata, existing_files, selected_file_ids)
 
     all_metadata_ids: list[int] = []
 

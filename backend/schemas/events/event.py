@@ -15,6 +15,7 @@ class FileMetadataIn(BaseModel):
     caption: str | None = None
     description: str | None = None
     thumbnail_blob_path: str | None = None
+    thumbnail_size_bytes: int | None = None
     sort_order: int = 0
 
 
