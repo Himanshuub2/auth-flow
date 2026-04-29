@@ -104,10 +104,12 @@ class DocumentOut(BaseModel):
     current_revision_number: int
     change_remarks: str | None
     deactivate_remarks: str | None
+    deactivated_by: str | None = None
     deactivated_at: datetime | None
     replaces_document_id: int | None = None
     created_by: str
     created_by_name: str
+    updated_by: str | None = None
     created_at: datetime
     updated_at: datetime
     files: list[DocumentFileSummary]

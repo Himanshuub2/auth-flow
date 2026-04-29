@@ -101,10 +101,12 @@ class EventOut(BaseModel):
     replaces_document_id: int | None = None
     created_by: str
     created_by_name: str
+    updated_by: str | None = None
     created_at: datetime
     updated_at: datetime
     change_remarks: str | None = None
     deactivate_remarks: str | None = None
+    deactivated_by: str | None = None
     deactivated_at: datetime | None = None
     like_count: int = 0
     liked_by_me: bool = False

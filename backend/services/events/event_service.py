@@ -3,7 +3,7 @@ import logging
 from fastapi import HTTPException, status
 from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from models.events.event import Event, EventRevision, EventStatus
 from models.events.event_media_item import EventMediaItem, FileType
@@ -148,15 +148,24 @@ def _build_media_summary(f: EventMediaItem, event: Event) -> MediaFileSummary:
 
 async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> EventOut:
     """Item detail: full Event + User.username only; media filtered by current version."""
+    updater = aliased(User)
+    deactivator = aliased(User)
     row = await db.execute(
-        select(Event, User.username.label("created_by_name"))
+        select(
+            Event,
+            User.username.label("created_by_name"),
+            updater.username.label("updated_by_name"),
+            deactivator.username.label("deactivated_by_name"),
+        )
         .join(User, Event.created_by == User.staff_id)
+        .outerjoin(updater, Event.updated_by == updater.staff_id)
+        .outerjoin(deactivator, Event.deactivated_by == deactivator.staff_id)
         .where(Event.id == event_id)
     )
     one = row.one_or_none()
     if not one:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
-    event, created_by_name = one[0], one[1]
+    event, created_by_name, updated_by_name, deactivated_by_name = one[0], one[1], one[2], one[3]
     ver = event.current_media_version
 
     file_ids = await _get_file_ids_for_version(db, event, ver if ver > 0 else 0)
@@ -165,6 +174,16 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
     version_files = [file_by_id[fid] for fid in file_ids if fid in file_by_id]
 
     files = [_build_media_summary(f, event) for f in version_files]
+    updated_by_display = (
+        f"{updated_by_name} ({event.updated_by})"
+        if event.updated_by and updated_by_name
+        else event.updated_by
+    )
+    deactivated_by_display = (
+        f"{deactivated_by_name} ({event.deactivated_by})"
+        if event.deactivated_by and deactivated_by_name
+        else event.deactivated_by
+    )
 
     lc = int(getattr(event, "like_count", 0) or 0)
     return EventOut(
@@ -183,10 +202,12 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         replaces_document_id=event.replaces_document_id,
         created_by=event.created_by,
         created_by_name=created_by_name,
+        updated_by=updated_by_display,
         created_at=event.created_at,
         updated_at=event.updated_at,
         change_remarks=event.change_remarks,
         deactivate_remarks=event.deactivate_remarks,
+        deactivated_by=deactivated_by_display,
         deactivated_at=event.deactivated_at,
         like_count=lc,
         liked_by_me=False,
@@ -617,31 +638,20 @@ def _validate_event_media_limits(
 ) -> None:
     """
     Validate per-event media limits before any rows are created.
-    Counts are computed across the final staging set:
-      kept existing files (selected_file_ids) + all files from file_metadata (de-duplicated).
+    Final staging set = kept existing files (selected_file_ids) + ALL file_metadata.
     """
-    existing_by_path = {f.file_url: f for f in existing_files}
     existing_id_set = {f.id for f in existing_files}
 
-    # Build the set of existing IDs that will be in final staging.
-    kept_ids: set[int] = set()
+    kept_files: list[EventMediaItem] = []
     if selected_file_ids is not None:
-        kept_ids = {fid for fid in selected_file_ids if fid in existing_id_set}
-    # Existing files matched via metadata blob path are also included.
-    for meta in file_metadata:
-        if meta.blob_path in existing_by_path:
-            kept_ids.add(existing_by_path[meta.blob_path].id)
-
-    kept_files = [f for f in existing_files if f.id in kept_ids]
-
-    # Separate truly new files (no existing row for this blob path).
-    new_meta = [m for m in file_metadata if m.blob_path not in existing_by_path]
+        kept_id_set = {fid for fid in selected_file_ids if fid in existing_id_set}
+        kept_files = [f for f in existing_files if f.id in kept_id_set]
 
     total_images = sum(1 for f in kept_files if f.file_type == FileType.IMAGE)
     total_videos = sum(1 for f in kept_files if f.file_type == FileType.VIDEO)
     total_thumbnails = sum(1 for f in kept_files if f.thumbnail_url)
 
-    for meta in new_meta:
+    for meta in file_metadata:
         if meta.file_type == FileType.IMAGE:
             total_images += 1
             if meta.file_size_bytes > MAX_EVENT_IMAGE_SIZE_BYTES:
@@ -695,7 +705,6 @@ async def _sync_media_from_metadata(
         This means metadata can append files even when selected_file_ids is empty.
     """
     existing_files = await _get_all_files(db, event.id)
-    existing_by_path = {f.file_url: f for f in existing_files}
     existing_id_set = {f.id for f in existing_files}
 
     _validate_event_media_limits(file_metadata, existing_files, selected_file_ids)
@@ -703,35 +712,27 @@ async def _sync_media_from_metadata(
     all_metadata_ids: list[int] = []
 
     for idx, meta in enumerate(file_metadata):
-        existing = existing_by_path.get(meta.blob_path)
-        if existing:
-            existing.caption = meta.caption
-            existing.description = meta.description
-            existing.sort_order = meta.sort_order if meta.sort_order else idx
-            if meta.thumbnail_blob_path is not None:
-                existing.thumbnail_url = meta.thumbnail_blob_path
-            all_metadata_ids.append(existing.id)
-        else:
-            item = EventMediaItem(
-                event_id=event.id,
-                file_type=meta.file_type,
-                file_url=meta.blob_path,
-                thumbnail_url=meta.thumbnail_blob_path,
-                caption=meta.caption,
-                description=meta.description,
-                sort_order=meta.sort_order if meta.sort_order else idx,
-                file_size_bytes=meta.file_size_bytes,
-                original_filename=meta.original_filename,
-            )
-            db.add(item)
-            await db.flush()
-            all_metadata_ids.append(item.id)
+        item = EventMediaItem(
+            event_id=event.id,
+            file_type=meta.file_type,
+            file_url=meta.blob_path,
+            thumbnail_url=meta.thumbnail_blob_path,
+            caption=meta.caption,
+            description=meta.description,
+            sort_order=meta.sort_order if meta.sort_order else idx,
+            file_size_bytes=meta.file_size_bytes,
+            original_filename=meta.original_filename,
+        )
+        db.add(item)
+        await db.flush()
+        all_metadata_ids.append(item.id)
 
     if selected_file_ids is None:
         event.staging_file_ids = all_metadata_ids
         logger.debug("Synced %d media items for event %s from metadata", len(file_metadata), event.id)
         return
 
+    kept_id_set = {fid for fid in selected_file_ids if fid in existing_id_set}
     desired_staging_ids: list[int] = []
     seen_ids: set[int] = set()
 
@@ -744,6 +745,21 @@ async def _sync_media_from_metadata(
         if fid not in seen_ids:
             desired_staging_ids.append(fid)
             seen_ids.add(fid)
+
+    if event.status == EventStatus.DRAFT:
+        removed = [f for f in existing_files if f.id not in kept_id_set]
+        if removed:
+            storage = get_storage()
+            for f in removed:
+                if f.file_url:
+                    await storage.delete(f.file_url)
+                if f.thumbnail_url:
+                    await storage.delete(f.thumbnail_url)
+                await db.delete(f)
+            logger.debug(
+                "Deleted %d removed media items (DB + blob) for draft event %s",
+                len(removed), event.id,
+            )
 
     event.staging_file_ids = desired_staging_ids
     logger.debug("Synced %d media items for event %s (kept + metadata)", len(desired_staging_ids), event.id)

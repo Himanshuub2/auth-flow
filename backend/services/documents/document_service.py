@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import String as SAString, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, selectinload
+from sqlalchemy.orm import aliased, load_only, selectinload
 
 from models.documents.document import (
     ApplicabilityType,
@@ -195,16 +195,25 @@ async def get_document_for_detail(db: AsyncSession, document_id: int) -> Documen
 
 async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -> DocumentOut:
     """Item detail: full Document + User.username only; files filtered by current version."""
+    updater = aliased(User)
+    deactivator = aliased(User)
     row = await db.execute(
-        select(Document, User.username.label("created_by_name"))
+        select(
+            Document,
+            User.username.label("created_by_name"),
+            updater.username.label("updated_by_name"),
+            deactivator.username.label("deactivated_by_name"),
+        )
         .join(User, Document.created_by == User.staff_id)
+        .outerjoin(updater, Document.updated_by == updater.staff_id)
+        .outerjoin(deactivator, Document.deactivated_by == deactivator.staff_id)
         .where(Document.id == document_id)
         .options(selectinload(Document.revisions), selectinload(Document.files))
     )
     one = row.one_or_none()
     if not one:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    doc, created_by_name = one[0], one[1]
+    doc, created_by_name, updated_by_name, deactivated_by_name = one[0], one[1], one[2], one[3]
     ver = doc.current_media_version
 
     file_ids = _get_file_ids_for_version_sync(doc, ver)
@@ -227,6 +236,16 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
     if doc.linked_document_ids:
         raw = await get_linked_document_details(db, doc.linked_document_ids)
         linked_details = [LinkedDocumentDetail(**r) for r in raw]
+    updated_by_display = (
+        f"{updated_by_name} ({doc.updated_by})"
+        if doc.updated_by and updated_by_name
+        else doc.updated_by
+    )
+    deactivated_by_display = (
+        f"{deactivated_by_name} ({doc.deactivated_by})"
+        if doc.deactivated_by and deactivated_by_name
+        else doc.deactivated_by
+    )
 
     return DocumentOut(
         id=doc.id,
@@ -245,10 +264,12 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         current_revision_number=doc.current_revision_number,
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
+        deactivated_by=deactivated_by_display,
         deactivated_at=doc.deactivated_at,
         replaces_document_id=doc.replaces_document_id,
         created_by=doc.created_by,
         created_by_name=created_by_name,
+        updated_by=updated_by_display,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         files=files,

@@ -35,6 +35,7 @@ class BulkApplicabilityHistoryItem(BaseModel):
     file_sas_url: str | None = None
     error: str | None = None
     change_remarks: str | None = None
+    organization_vertical: str = "Organization (Vertical)"
 
     model_config = {"from_attributes": True}
 

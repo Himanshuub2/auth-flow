@@ -140,7 +140,7 @@ async def get_history(
         data = [
             BulkApplicabilityHistoryItem(
                 id=item.id,
-                updated_by=item.creator.username if item.creator else item.created_by,
+                updated_by=f"{item.creator.username} ({item.created_by})" if item.creator else item.created_by,
                 updated_on=item.updated_at,
                 status=item.status,
                 file_name=item.file_name,
@@ -148,7 +148,6 @@ async def get_history(
                 error=item.error_message,
                 change_remarks=item.change_remarks,
             ).model_dump()
-
         ]
         return APIResponse(
             message="History fetched",
@@ -164,7 +163,7 @@ async def get_history(
         data.append(
             BulkApplicabilityHistoryItem(
                 id=item.id,
-                updated_by=item.creator.username if item.creator else item.created_by,
+                updated_by=f"{item.creator.username} ({item.created_by})" if item.creator else item.created_by,
                 updated_on=item.updated_at,
                 status=item.status,
                 file_name=item.file_name,
