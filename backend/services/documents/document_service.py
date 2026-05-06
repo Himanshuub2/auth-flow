@@ -18,6 +18,7 @@ from models.documents.document import (
     ROLE_DOCUMENT_TYPES,
     document_type_to_label,
 )
+from models.documents.legislation import Legislation, SubLegislation
 from models.documents.document_file import DocumentFile, DocumentFileType
 from models.events.user import User
 from utils.security import CurrentUser
@@ -214,9 +215,8 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
     if not one:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     doc, created_by_name, updated_by_name, deactivated_by_name = one[0], one[1], one[2], one[3]
-    ver = doc.current_media_version
 
-    file_ids = _get_file_ids_for_version_sync(doc, ver)
+    file_ids = _get_current_file_ids_sync(doc)
     file_by_id = {f.id: f for f in doc.files}
     version_files = [file_by_id[fid] for fid in file_ids if fid in file_by_id]
 
@@ -247,6 +247,9 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         else doc.deactivated_by
     )
 
+    legislation_name, sub_legislation_name = await _get_legislation_names(
+        db, doc.legislation_id, doc.sub_legislation_id
+    )
     return DocumentOut(
         id=doc.id,
         name=doc.name,
@@ -254,14 +257,16 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         tags=doc.tags,
         summary=doc.summary,
         legislation_id=doc.legislation_id,
+        legislation_name=legislation_name,
         sub_legislation_id=doc.sub_legislation_id,
+        sub_legislation_name=sub_legislation_name,
         next_review_date=doc.next_review_date,
         download_allowed=doc.download_allowed,
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
         status=doc.status,
-        current_media_version=ver,
-        current_revision_number=doc.current_revision_number,
+        version=float(doc.version),
+        revision=doc.revision,
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
         deactivated_by=deactivated_by_display,
@@ -790,7 +795,7 @@ async def list_revisions(db: AsyncSession, document_id: int) -> list[DocumentRev
     result = await db.execute(
         select(DocumentRevision)
         .where(DocumentRevision.document_id == document_id)
-        .order_by(DocumentRevision.media_version.desc(), DocumentRevision.revision_number.desc())
+        .order_by(DocumentRevision.revision_number.desc(), DocumentRevision.media_version.desc())
     )
     revs = list(result.scalars().all())
     if revs:
@@ -804,15 +809,16 @@ async def list_revisions(db: AsyncSession, document_id: int) -> list[DocumentRev
 
 
 async def get_revision(
-    db: AsyncSession, document_id: int, media_version: int, revision_number: int,
+    db: AsyncSession, document_id: int, revision_number: int,
 ) -> DocumentRevision:
     result = await db.execute(
         select(DocumentRevision)
         .where(
             DocumentRevision.document_id == document_id,
-            DocumentRevision.media_version == media_version,
             DocumentRevision.revision_number == revision_number,
         )
+        .order_by(DocumentRevision.media_version.desc())
+        .limit(1)
         .options(
             selectinload(DocumentRevision.creator),
             selectinload(DocumentRevision.document),
@@ -826,13 +832,13 @@ async def get_revision(
 
 
 def _compute_media_versions(file_id: int, doc: Document) -> list[int]:
-    """Compute the media_versions list for a file based on staging and revisions."""
+    """Compute which revision_numbers a file appears in (0 = staging)."""
     versions: list[int] = []
     if file_id in (doc.staging_file_ids or []):
         versions.append(0)
     for rev in (doc.revisions or []):
         if file_id in (rev.file_ids or []):
-            versions.append(rev.media_version)
+            versions.append(rev.revision_number)
     return sorted(set(versions))
 
 
@@ -841,9 +847,7 @@ def build_document_out(
     linked_document_details: list[LinkedDocumentDetail] | None = None,
 ) -> DocumentOut:
     """Build DocumentOut from loaded Document (with files and creator)."""
-    ver = doc.current_media_version
-    target_ver = ver if ver > 0 else 0
-    target_file_ids = _get_file_ids_for_version_sync(doc, target_ver)
+    target_file_ids = _get_current_file_ids_sync(doc)
     file_by_id = {f.id: f for f in doc.files}
     files = [
         DocumentFileSummary(
@@ -865,16 +869,14 @@ def build_document_out(
         summary=doc.summary,
         legislation_id=doc.legislation_id,
         sub_legislation_id=doc.sub_legislation_id,
-        version=doc.version,
+        version=float(doc.version),
         next_review_date=doc.next_review_date,
         download_allowed=doc.download_allowed,
         linked_document_ids=doc.linked_document_ids,
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
         status=doc.status,
-        current_media_version=ver,
-        current_revision_number=doc.current_revision_number,
-        version_display=f"{ver}.{doc.current_revision_number}",
+        revision=doc.revision,
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
         deactivated_at=doc.deactivated_at,
@@ -888,14 +890,29 @@ def build_document_out(
     )
 
 
+async def _get_legislation_names(
+    db: AsyncSession, legislation_id: int | None, sub_legislation_id: int | None
+) -> tuple[str | None, str | None]:
+    legislation_name = None
+    sub_legislation_name = None
+    if legislation_id is not None:
+        legislation_name = (
+            await db.execute(select(Legislation.name).where(Legislation.id == legislation_id))
+        ).scalar_one_or_none()
+    if sub_legislation_id is not None:
+        sub_legislation_name = (
+            await db.execute(select(SubLegislation.name).where(SubLegislation.id == sub_legislation_id))
+        ).scalar_one_or_none()
+    return legislation_name, sub_legislation_name
+
+
 async def get_revision_snapshot(
     db: AsyncSession,
     document_id: int,
-    media_version: int,
     revision_number: int,
 ) -> tuple[DocumentRevision, list[DocumentFile]]:
-    """Load document revision and files at that media version."""
-    revision = await get_revision(db, document_id, media_version, revision_number)
+    """Load document revision and files for that revision."""
+    revision = await get_revision(db, document_id, revision_number)
     all_files = await _get_all_files(db, document_id)
     file_by_id = {f.id: f for f in all_files}
     files = [file_by_id[fid] for fid in (revision.file_ids or []) if fid in file_by_id]
@@ -934,6 +951,9 @@ async def _validate_document_save_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="FAQ documents cannot have linked items",
         )
+
+    if not is_new and payload.version != float(existing_doc.version):
+        await _validate_version_unique(db, payload.version, exclude_id=existing_doc.id)
 
     if not is_new and existing_doc.document_type != payload.document_type:
         raise HTTPException(
@@ -1058,7 +1078,7 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
     if existing:
         return existing
 
-    parent_file_ids = await _get_file_ids_for_version(db, parent, parent.current_media_version)
+    parent_file_ids = await _get_current_file_ids(db, parent)
 
     parent_files = await _get_all_files(db, parent.id)
     parent_file_by_id = {f.id: f for f in parent_files}
@@ -1076,8 +1096,7 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
         linked_document_ids=parent.linked_document_ids,
         applicability_type=parent.applicability_type,
         applicability_refs=parent.applicability_refs,
-        current_media_version=parent.current_media_version,
-        current_revision_number=parent.current_revision_number,
+        revision=parent.revision,
         status=DocumentStatus.DRAFT,
         replaces_document_id=parent.id,
         created_by=user_id,
@@ -1107,22 +1126,23 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
 
 
 async def _publish_document(db: AsyncSession, doc: Document) -> None:
-    if doc.current_media_version == 0:
-        doc.current_media_version = 1
-        doc.current_revision_number = 0
-    else:
-        if await _version_should_bump(db, doc):
-            doc.current_media_version += 1
-            doc.current_revision_number = 0
+    last_rev = await _get_latest_revision(db, doc.id)
+    if last_rev:
+        metadata_changed = _metadata_changed_vs_revision(doc, last_rev)
+        files_changed = await _staging_files_differ_from_revision(db, doc, last_rev)
+        if metadata_changed or files_changed:
+            doc.revision += 1
         else:
-            doc.current_revision_number += 1
+            doc.staging_file_ids = []
+            doc.status = DocumentStatus.ACTIVE
+            return
 
     published_file_ids = list(doc.staging_file_ids or [])
 
     db.add(DocumentRevision(
         document_id=doc.id,
-        media_version=doc.current_media_version,
-        revision_number=doc.current_revision_number,
+        media_version=1,
+        revision_number=doc.revision,
         name=doc.name,
         document_type=doc.document_type,
         tags=doc.tags,
@@ -1148,15 +1168,16 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent document not found")
 
     last_rev = _find_latest_revision(parent)
-    name_changed = (draft.name != last_rev.name) if last_rev else True
-    files_changed = await _files_differ_between(db, draft, 0, parent, parent.current_media_version)
+    any_changes = True
+    if last_rev:
+        metadata_changed = _metadata_changed_vs_revision(draft, last_rev)
+        files_changed = await _staging_files_differ_from_revision(db, draft, last_rev)
+        any_changes = metadata_changed or files_changed
 
-    if name_changed or files_changed:
-        draft.current_media_version = parent.current_media_version + 1
-        draft.current_revision_number = 0
+    if any_changes:
+        draft.revision = parent.revision + 1
     else:
-        draft.current_media_version = parent.current_media_version
-        draft.current_revision_number = parent.current_revision_number + 1
+        draft.revision = parent.revision
 
     published_file_ids = list(draft.staging_file_ids or [])
 
@@ -1167,19 +1188,22 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
     for f in parent_files:
         f.document_id = draft.id
 
-    db.add(DocumentRevision(
-        document_id=draft.id,
-        media_version=draft.current_media_version,
-        revision_number=draft.current_revision_number,
-        name=draft.name,
-        document_type=draft.document_type,
-        tags=draft.tags,
-        summary=draft.summary,
-        applicability_type=draft.applicability_type,
-        applicability_refs=draft.applicability_refs,
-        file_ids=published_file_ids,
-        created_by=draft.created_by,
-    ))
+    if any_changes:
+        db.add(DocumentRevision(
+            document_id=draft.id,
+            media_version=1,
+            revision_number=draft.revision,
+            name=draft.name,
+            document_type=draft.document_type,
+            tags=draft.tags,
+            summary=draft.summary,
+            applicability_type=draft.applicability_type,
+            applicability_refs=draft.applicability_refs,
+            file_ids=published_file_ids,
+            created_by=draft.created_by,
+        ))
+    elif last_rev is not None:
+        last_rev.file_ids = list(published_file_ids)
 
     parent.status = DocumentStatus.INACTIVE
     draft.status = DocumentStatus.ACTIVE
@@ -1198,13 +1222,24 @@ def _find_latest_revision(doc: Document) -> DocumentRevision | None:
     return max(doc.revisions, key=lambda r: (r.media_version, r.revision_number))
 
 
-async def _version_should_bump(db: AsyncSession, doc: Document) -> bool:
-    last_rev = _find_latest_revision(doc)
-    if not last_rev:
-        return True
-    if doc.name != last_rev.name:
-        return True
-    return await _files_differ_between(db, doc, 0, doc, doc.current_media_version)
+async def _get_latest_revision(db: AsyncSession, document_id: int) -> DocumentRevision | None:
+    result = await db.execute(
+        select(DocumentRevision)
+        .where(DocumentRevision.document_id == document_id)
+        .order_by(DocumentRevision.revision_number.desc(), DocumentRevision.media_version.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+def _metadata_changed_vs_revision(doc: Document, last_rev: DocumentRevision) -> bool:
+    return (
+        doc.name != last_rev.name
+        or doc.tags != last_rev.tags
+        or doc.summary != last_rev.summary
+        or doc.applicability_type != last_rev.applicability_type
+        or doc.applicability_refs != last_rev.applicability_refs
+    )
 
 
 async def _get_all_files(db: AsyncSession, document_id: int) -> list[DocumentFile]:
@@ -1221,54 +1256,55 @@ def _get_staging_files(doc: Document) -> list[int]:
     return list(doc.staging_file_ids or [])
 
 
-def _get_file_ids_for_version_sync(doc: Document, version: int) -> list[int]:
-    """Sync version: get file IDs for a version from loaded doc (staging or revisions)."""
-    if version == 0:
-        return list(doc.staging_file_ids or [])
-    for rev in (doc.revisions or []):
-        if rev.media_version == version:
-            return list(rev.file_ids or [])
+def _get_current_file_ids_sync(doc: Document) -> list[int]:
+    """Get file IDs for the doc's current state from loaded relations."""
+    if doc.status != DocumentStatus.DRAFT and doc.revisions:
+        latest = max(doc.revisions, key=lambda r: (r.revision_number, r.media_version))
+        return list(latest.file_ids or [])
     return list(doc.staging_file_ids or [])
 
 
-async def _get_file_ids_for_version(db: AsyncSession, doc: Document, version: int) -> list[int]:
-    """Get file IDs for a version. For staging (0), use doc.staging_file_ids. For published, find revision."""
-    if version == 0:
-        return list(doc.staging_file_ids or [])
-    result = await db.execute(
-        select(DocumentRevision.file_ids)
-        .where(
-            DocumentRevision.document_id == doc.id,
-            DocumentRevision.media_version == version,
+async def _get_current_file_ids(db: AsyncSession, doc: Document) -> list[int]:
+    """Get file IDs for the doc's current state. Active -> latest revision; Draft -> staging."""
+    if doc.status != DocumentStatus.DRAFT:
+        result = await db.execute(
+            select(DocumentRevision.file_ids)
+            .where(DocumentRevision.document_id == doc.id)
+            .order_by(DocumentRevision.revision_number.desc(), DocumentRevision.media_version.desc())
+            .limit(1)
         )
-        .order_by(DocumentRevision.revision_number.desc())
-        .limit(1)
-    )
-    row = result.scalar_one_or_none()
-    if row is not None:
-        return list(row)
+        row = result.scalar_one_or_none()
+        if row is not None:
+            return list(row)
     return list(doc.staging_file_ids or [])
 
 
-async def _get_names_for_version(
-    db: AsyncSession, doc: Document, version: int,
-) -> set[str]:
-    file_ids = await _get_file_ids_for_version(db, doc, version)
+async def _get_names_from_file_ids(db: AsyncSession, document_id: int, file_ids: list[int]) -> set[str]:
     if not file_ids:
         return set()
-    all_files = await _get_all_files(db, doc.id)
+    all_files = await _get_all_files(db, document_id)
     file_by_id = {f.id: f for f in all_files}
     return {file_by_id[fid].original_filename for fid in file_ids if fid in file_by_id}
 
 
-async def _files_differ_between(
-    db: AsyncSession,
-    doc_a: Document, ver_a: int,
-    doc_b: Document, ver_b: int,
+async def _staging_files_differ_from_revision(
+    db: AsyncSession, doc: Document, last_rev: DocumentRevision,
 ) -> bool:
-    names_a = await _get_names_for_version(db, doc_a, ver_a)
-    names_b = await _get_names_for_version(db, doc_b, ver_b)
-    return names_a != names_b
+    staging_names = await _get_names_from_file_ids(db, doc.id, list(doc.staging_file_ids or []))
+    rev_names = await _get_names_from_file_ids(db, doc.id, list(last_rev.file_ids or []))
+    return staging_names != rev_names
+
+
+async def _validate_version_unique(db: AsyncSession, version: float, *, exclude_id: int | None = None) -> None:
+    stmt = select(Document.id).where(Document.version == version).limit(1)
+    if exclude_id is not None:
+        stmt = stmt.where(Document.id != exclude_id)
+    existing = (await db.execute(stmt)).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Version {version} already exists for another document",
+        )
 
 
 async def _sync_staging(
