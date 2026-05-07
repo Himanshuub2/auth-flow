@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from models.events.event import ApplicabilityType, EventStatus
 from models.events.event_media_item import FileType
@@ -31,6 +31,14 @@ class EventSavePayload(BaseModel):
     selected_file_ids: list[int] | None = None
     file_metadata: list[FileMetadataIn] | None = None
     change_remarks: str | None = None
+    version: float = 1.0
+
+    @field_validator("version")
+    @classmethod
+    def validate_version_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("version must be greater than 0")
+        return v
 
 
 class UploadUrlRequest(BaseModel):
@@ -92,9 +100,8 @@ class EventOut(BaseModel):
     event_dates: list | dict | None
     description: str | None
     tags: list | None
-    current_media_version: int
-    current_revision_number: int
-    version_display: str
+    version: float
+    revision: int
     status: EventStatus
     applicability_type: ApplicabilityType
     applicability_refs: dict | list | None
@@ -118,9 +125,8 @@ class EventOut(BaseModel):
 class RevisionOut(BaseModel):
     id: int
     event_id: int
-    media_version: int
+    version: float
     revision_number: int
-    version_display: str
     event_name: str
     sub_event_name: str | None
     event_dates: list | dict | None
@@ -142,8 +148,7 @@ class RevisionListItemOut(BaseModel):
 
     id: int
     event_id: int
-    media_version: int
+    version: float
     revision_number: int
-    version_display: str
     change_remarks: str | None = None
     created_at: datetime

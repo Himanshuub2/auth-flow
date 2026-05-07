@@ -16,15 +16,14 @@ async def list_revisions(db: AsyncSession, event_id: int):
         select(
             EventRevision.id,
             EventRevision.event_id,
-            EventRevision.media_version,
             EventRevision.revision_number,
             EventRevision.change_remarks,
             EventRevision.created_at,
         )
         .where(EventRevision.event_id == event_id)
         .order_by(
-            EventRevision.media_version.desc(),
             EventRevision.revision_number.desc(),
+            EventRevision.media_version.desc(),
         )
     )
     rows = result.all()
@@ -36,15 +35,16 @@ async def list_revisions(db: AsyncSession, event_id: int):
 
 
 async def get_revision_snapshot(
-    db: AsyncSession, event_id: int, media_version: int, revision_number: int
+    db: AsyncSession, event_id: int, revision_number: int
 ) -> tuple[EventRevision, list[EventMediaItem]]:
     result = await db.execute(
         select(EventRevision)
         .where(
             EventRevision.event_id == event_id,
-            EventRevision.media_version == media_version,
             EventRevision.revision_number == revision_number,
         )
+        .order_by(EventRevision.media_version.desc())
+        .limit(1)
         .options(
             selectinload(EventRevision.creator),
             selectinload(EventRevision.event),
@@ -54,7 +54,7 @@ async def get_revision_snapshot(
     if not revision:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Revision {media_version}.{revision_number} not found",
+            detail=f"Revision {revision_number} not found",
         )
 
     file_ids = revision.file_ids or []

@@ -19,7 +19,7 @@ class DocumentSavePayload(BaseModel):
     summary: str | None = None
     legislation_id: int | None = None
     sub_legislation_id: int | None = None
-    version: int = 1
+    version: float = 1.0
     next_review_date: date | None = None
     download_allowed: bool = True
     linked_document_ids: list[int] | None = None
@@ -58,6 +58,13 @@ class DocumentSavePayload(BaseModel):
         allowed = ", ".join(sorted(t.value for t in DocumentType))
         raise ValueError(f"Invalid document_type. Allowed constants: {allowed}")
 
+    @field_validator("version")
+    @classmethod
+    def validate_version_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("version must be greater than 0")
+        return v
+
 
 class DeactivatePayload(BaseModel):
     deactivate_remarks: str
@@ -94,14 +101,16 @@ class DocumentOut(BaseModel):
     tags: list | None
     summary: str | None
     legislation_id: int | None
+    legislation_name: str | None = None
     sub_legislation_id: int | None
+    sub_legislation_name: str | None = None
     next_review_date: date | None
     download_allowed: bool
     applicability_type: ApplicabilityType
     applicability_refs: dict | list | None
     status: DocumentStatus
-    current_media_version: int
-    current_revision_number: int
+    version: float
+    revision: int
     change_remarks: str | None
     deactivate_remarks: str | None
     deactivated_by: str | None = None
@@ -121,11 +130,14 @@ class DocumentOut(BaseModel):
 class DocumentRevisionOut(BaseModel):
     id: int
     document_id: int
-    media_version: int
+    version: float
     revision_number: int
-    version_display: str
     name: str
     document_type: str
+    legislation_id: int | None = None
+    legislation_name: str | None = None
+    sub_legislation_id: int | None = None
+    sub_legislation_name: str | None = None
     tags: list | None
     summary: str | None
     applicability_type: ApplicabilityType
@@ -144,9 +156,8 @@ class DocumentRevisionOut(BaseModel):
 class RevisionListItemOut(BaseModel):
     id: int
     document_id: int
-    media_version: int
+    version: float
     revision_number: int
-    version_display: str
     created_at: datetime
 
 

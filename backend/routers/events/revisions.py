@@ -13,23 +13,33 @@ router = APIRouter()
 
 
 def _rev_to_out(rev) -> RevisionOut:
-    d = {c.key: getattr(rev, c.key) for c in rev.__table__.columns}
-    d["version_display"] = f"{rev.media_version}.{rev.revision_number}"
-    d["created_by_name"] = rev.creator.username
     event = rev.event
-    d["status"] = event.status.value
-    d["updated_at"] = event.updated_at
-    d["deactivate_remarks"] = event.deactivate_remarks
-    return RevisionOut(**d)
+    return RevisionOut(
+        id=rev.id,
+        event_id=rev.event_id,
+        version=float(event.version),
+        revision_number=rev.revision_number,
+        event_name=rev.event_name,
+        sub_event_name=rev.sub_event_name,
+        event_dates=rev.event_dates,
+        description=rev.description,
+        tags=rev.tags,
+        change_remarks=rev.change_remarks,
+        deactivate_remarks=event.deactivate_remarks,
+        status=event.status.value,
+        updated_at=event.updated_at,
+        created_by=rev.created_by,
+        created_by_name=rev.creator.username,
+        created_at=rev.created_at,
+    )
 
 
 def _rev_list_item_from_row(row) -> RevisionListItemOut:
     return RevisionListItemOut(
         id=row.id,
         event_id=row.event_id,
-        media_version=row.media_version,
+        version=1,
         revision_number=row.revision_number,
-        version_display=f"{row.media_version}.{row.revision_number}",
         created_at=row.created_at,
     )
 
@@ -45,16 +55,15 @@ async def list_revisions(
     return APIResponse(message="Revisions fetched", status_code=200, status="success", data=data)
 
 
-@router.get("/{media_version}/{revision_number}", response_model=APIResponse)
+@router.get("/{revision_number}", response_model=APIResponse)
 async def get_revision(
     event_id: int,
-    media_version: int,
     revision_number: int,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
     revision, media_items = await revision_service.get_revision_snapshot(
-        db, event_id, media_version, revision_number
+        db, event_id, revision_number
     )
     data = RevisionDetailOut(
         revision=_rev_to_out(revision),
@@ -62,7 +71,7 @@ async def get_revision(
             MediaItemOut(
                 id=m.id,
                 event_id=m.event_id,
-                media_versions=[media_version],
+                media_versions=[revision_number],
                 file_type=m.file_type,
                 file_url=m.file_url,
                 thumbnail_url=m.thumbnail_url,

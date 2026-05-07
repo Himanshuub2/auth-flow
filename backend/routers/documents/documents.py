@@ -50,7 +50,6 @@ def _to_out(
 
 
 def _to_list_out(doc: Document) -> DocumentOut:
-    ver = doc.current_media_version
     return DocumentOut(
         id=doc.id,
         name=doc.name,
@@ -59,16 +58,14 @@ def _to_list_out(doc: Document) -> DocumentOut:
         summary=doc.summary,
         legislation_id=doc.legislation_id,
         sub_legislation_id=doc.sub_legislation_id,
-        version=doc.version,
+        version=float(doc.version),
         next_review_date=format_date_dmy_month_abbr(doc.next_review_date) if doc.next_review_date else None,
         download_allowed=doc.download_allowed,
         linked_document_ids=doc.linked_document_ids,
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
         status=doc.status,
-        current_media_version=ver,
-        current_revision_number=doc.current_revision_number,
-        version_display=f"{ver}.{doc.current_revision_number}",
+        revision=doc.revision,
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
         deactivated_at=format_date_dmy_month_abbr(doc.deactivated_at) if doc.deactivated_at else None,
@@ -261,9 +258,8 @@ async def list_revisions(
         RevisionListItemOut(
             id=r.id,
             document_id=r.document_id,
-            media_version=r.media_version,
+            version=1,
             revision_number=r.revision_number,
-            version_display=f"{r.media_version}.{r.revision_number}",
             created_at=r.created_at,
         )
         for r in revs
@@ -271,23 +267,23 @@ async def list_revisions(
     return APIResponse(message="Revisions fetched", status_code=200, status="success", data=data)
 
 
-@router.get("/{document_id}/revisions/{media_version}/{revision_number}", response_model=APIResponse)
+@router.get("/{document_id}/revisions/{revision_number}", response_model=APIResponse)
 async def get_revision(
     document_id: int,
-    media_version: int,
     revision_number: int,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    rev = await document_service.get_revision(db, document_id, media_version, revision_number)
+    rev = await document_service.get_revision(db, document_id, revision_number)
     data = DocumentRevisionOut(
         id=rev.id,
         document_id=rev.document_id,
-        media_version=rev.media_version,
+        version=float(rev.document.version),
         revision_number=rev.revision_number,
-        version_display=f"{rev.media_version}.{rev.revision_number}",
         name=rev.name,
         document_type=document_type_to_label(rev.document_type.value),
+        legislation_id=rev.document.legislation_id,
+        sub_legislation_id=rev.document.sub_legislation_id,
         tags=rev.tags,
         summary=rev.summary,
         applicability_type=rev.applicability_type,

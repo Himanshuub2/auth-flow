@@ -2,7 +2,7 @@ import enum
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -129,7 +129,7 @@ class Document(BaseDocuments):
         Integer, ForeignKey(f"{SCHEMA}.sub_legislation.id", ondelete="SET NULL"), nullable=True,
     )
 
-    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    version: Mapped[float] = mapped_column(Numeric(10, 2), default=1.0, nullable=False, server_default="1.0")
     next_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     download_allowed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -146,8 +146,7 @@ class Document(BaseDocuments):
         default=DocumentStatus.DRAFT,
     )
 
-    current_media_version: Mapped[int] = mapped_column(Integer, default=0)
-    current_revision_number: Mapped[int] = mapped_column(Integer, default=0)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False, server_default="1")
 
     staging_file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
@@ -175,7 +174,7 @@ class Document(BaseDocuments):
 
     revisions: Mapped[list["DocumentRevision"]] = relationship(
         back_populates="document", lazy="selectin",
-        order_by="desc(DocumentRevision.media_version), desc(DocumentRevision.revision_number)",
+        order_by="desc(DocumentRevision.revision_number), desc(DocumentRevision.media_version)",
     )
     files: Mapped[list["DocumentFile"]] = relationship(
         back_populates="document", lazy="selectin",

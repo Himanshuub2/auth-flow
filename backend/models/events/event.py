@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,8 +36,8 @@ class Event(BaseEvents):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
-    current_media_version: Mapped[int] = mapped_column(Integer, default=0)
-    current_revision_number: Mapped[int] = mapped_column(Integer, default=0)
+    version: Mapped[float] = mapped_column(Numeric(10, 2), default=1.0, nullable=False, server_default="1.0")
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False, server_default="1")
 
     staging_file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
@@ -73,7 +73,7 @@ class Event(BaseEvents):
 
     revisions: Mapped[list["EventRevision"]] = relationship(
         back_populates="event", lazy="selectin",
-        order_by="desc(EventRevision.media_version), desc(EventRevision.revision_number)",
+        order_by="desc(EventRevision.revision_number), desc(EventRevision.media_version)",
     )
     media_items: Mapped[list["EventMediaItem"]] = relationship(
         back_populates="event", lazy="selectin",

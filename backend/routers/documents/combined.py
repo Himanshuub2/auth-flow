@@ -84,10 +84,9 @@ async def list_item_revisions(
     return APIResponse(message="Revisions fetched", status_code=200, status="success", data=data)
 
 
-@router.get("/{item_id}/revisions/{media_version}/{revision_number}", response_model=APIResponse)
+@router.get("/{item_id}/revisions/{revision_number}", response_model=APIResponse)
 async def get_item_revision_snapshot(
     item_id: int,
-    media_version: int,
     revision_number: int,
     item_type: str = Query(..., description=f"'{EVENT}' or '{DOCUMENT}'"),
     db: AsyncSession = Depends(get_db),
@@ -95,10 +94,10 @@ async def get_item_revision_snapshot(
 ):
     data = await items_service.get_item_revision_snapshot(
         db, item_id=item_id, item_type=item_type,
-        media_version=media_version, revision_number=revision_number,
+        revision_number=revision_number,
     )
     logger.info(
-        "get_item_revision_snapshot item_id=%s item_type=%s mv=%s rn=%s",
-        item_id, item_type, media_version, revision_number,
+        "get_item_revision_snapshot item_id=%s item_type=%s rn=%s",
+        item_id, item_type, revision_number,
     )
     return APIResponse(message="Revision fetched", status_code=200, status="success", data=data)

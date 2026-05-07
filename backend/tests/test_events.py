@@ -121,11 +121,9 @@ def test_create_event_activate_and_verify_revision(client: TestClient) -> None:
     assert detail.status_code == 200
     data = detail.json()["data"]
     if "version_display" in data:
-        current_media_version = data["current_media_version"]
-        current_revision_number = data["current_revision_number"]
-        assert current_media_version >= 0
-        assert current_revision_number >= 0
-        assert data["version_display"] == f"{current_media_version}.{current_revision_number}"
+        assert "version" in data
+        assert "revision" in data
+        assert data["revision"] >= 1
 
     rev_resp = client.get(
         "/api/items/{0}/revisions".format(event_id),
@@ -137,7 +135,6 @@ def test_create_event_activate_and_verify_revision(client: TestClient) -> None:
     revisions = rev_body.get("data", [])
     if revisions:
         first = revisions[0]
-        assert "media_version" in first
         assert "revision_number" in first
         assert "version_display" in first
 
@@ -161,11 +158,10 @@ def test_get_revision_via_combined(client: TestClient) -> None:
     revisions = rev_list.json().get("data", [])
     if revisions:
         rev = revisions[0]
-        mv = rev.get("media_version")
         rn = rev.get("revision_number")
-        if mv is not None and rn is not None:
+        if rn is not None:
             detail = client.get(
-                "/api/items/{0}/revisions/{1}/{2}".format(event_id, mv, rn),
+                "/api/items/{0}/revisions/{1}".format(event_id, rn),
                 params={"item_type": "event"},
             )
             assert detail.status_code == 200
@@ -180,7 +176,7 @@ def test_get_revision_invalid_version(client: TestClient) -> None:
     event_id = create.json()["data"]["id"]
 
     resp = client.get(
-        "/api/items/{0}/revisions/99/99".format(event_id),
+        "/api/items/{0}/revisions/99".format(event_id),
         params={"item_type": "event"},
     )
     assert resp.status_code == 404

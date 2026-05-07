@@ -31,7 +31,7 @@ def _document_payload(
         "summary": None,
         "legislation_id": None,
         "sub_legislation_id": None,
-        "version": 1,
+        "version": 1.0,
         "next_review_date": None,
         "download_allowed": True,
         "linked_document_ids": None,
@@ -143,11 +143,9 @@ def test_create_document_activate_and_verify_revision(client: TestClient) -> Non
     assert detail.status_code == 200
     data = detail.json()["data"]
     if "version_display" in data:
-        current_media_version = data["current_media_version"]
-        current_revision_number = data["current_revision_number"]
-        assert current_media_version >= 0
-        assert current_revision_number >= 0
-        assert data["version_display"] == f"{current_media_version}.{current_revision_number}"
+        assert "version" in data
+        assert "revision" in data
+        assert data["revision"] >= 1
 
     rev_resp = client.get("/api/documents/{0}/revisions/".format(doc_id))
     assert rev_resp.status_code == 200
@@ -156,7 +154,6 @@ def test_create_document_activate_and_verify_revision(client: TestClient) -> Non
     revisions = rev_body.get("data", [])
     if revisions:
         first = revisions[0]
-        assert "media_version" in first
         assert "revision_number" in first
         assert "version_display" in first
 
@@ -181,11 +178,10 @@ def test_get_revision_direct(client: TestClient) -> None:
     revisions = rev_list.json().get("data", [])
     if revisions:
         rev = revisions[0]
-        mv = rev.get("media_version")
         rn = rev.get("revision_number")
-        if mv is not None and rn is not None and rn > 0:
+        if rn is not None:
             detail = client.get(
-                "/api/documents/{0}/revisions/{1}/{2}".format(doc_id, mv, rn),
+                "/api/documents/{0}/revisions/{1}".format(doc_id, rn),
             )
             assert detail.status_code == 200
             assert detail.json()["status"] == "success"
@@ -201,7 +197,7 @@ def test_get_revision_invalid_version(client: TestClient) -> None:
     assert create.status_code == 201
     doc_id = create.json()["data"]["id"]
 
-    resp = client.get("/api/documents/{0}/revisions/99/99".format(doc_id))
+    resp = client.get("/api/documents/{0}/revisions/99".format(doc_id))
     assert resp.status_code == 404
 
 

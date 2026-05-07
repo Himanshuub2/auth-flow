@@ -21,20 +21,13 @@ from models.documents.document import (
     DOCUMENT_TYPE_LABELS,
     LABEL_TO_DOCUMENT_TYPE,
 )
+from models.documents.legislation import Legislation, SubLegislation
 from models.events.event import Event, EventStatus
 from models.events.user import User
 from schemas.documents.combined import CombinedItemOut, ItemRevisionListItemOut
 from schemas.documents.items_filter import ItemsKpiOut
-from schemas.documents.document import (
-    DocumentOut,
-    DocumentRevisionDetailOut,
-    DocumentRevisionOut,
-    DocumentFileSummary,
-    LinkedDocumentDetail,
-)
-from schemas.events.event import EventOut, RevisionOut
-from schemas.events.event_revision import RevisionDetailOut
-from schemas.events.event_media import MediaItemOut
+from schemas.documents.document import DocumentOut, DocumentFileSummary, LinkedDocumentDetail
+from schemas.events.event import EventOut, MediaFileSummary
 from services.documents import document_service
 from services.events import event_service, revision_service
 from storage import get_storage
@@ -62,7 +55,6 @@ async def list_combined(
             literal(EVENT).label("item_type"),
             Event.event_name.label("name"),
             literal(None).label("document_type"),
-            (Event.current_media_version.cast(String) + literal(".") + Event.current_revision_number.cast(String)).label("version_display"),
             Event.status.cast(String).label("status"),
             Event.created_by.label("created_by"),
             Event.created_at.label("created_at"),
@@ -70,8 +62,8 @@ async def list_combined(
             Event.deactivated_by.label("deactivated_by"),
             Event.deactivated_at.label("deactivated_at"),
             literal(None).label("next_review_date"),
-            Event.current_revision_number.label("revision"),
-            Event.current_media_version.label("version"),
+            Event.revision.label("revision"),
+            Event.version.label("version"),
         )
     )
     doc_q = (
@@ -80,7 +72,6 @@ async def list_combined(
             literal(DOCUMENT).label("item_type"),
             Document.name.label("name"),
             Document.document_type.cast(String).label("document_type"),
-            (Document.current_media_version.cast(String) + literal(".") + Document.current_revision_number.cast(String)).label("version_display"),
             Document.status.cast(String).label("status"),
             Document.created_by.label("created_by"),
             Document.created_at.label("created_at"),
@@ -88,7 +79,7 @@ async def list_combined(
             Document.deactivated_by.label("deactivated_by"),
             Document.deactivated_at.label("deactivated_at"),
             Document.next_review_date.label("next_review_date"),
-            Document.current_revision_number.label("revision"),
+            Document.revision.label("revision"),
             Document.version.label("version"),
         )
     )
@@ -123,7 +114,6 @@ async def list_combined(
             id=r.id,
             name=r.name,
             document_type=EVENT if r.item_type == EVENT else (document_type_to_label(r.document_type) or str(r.document_type)),
-            version_display=r.version_display,
             status=r.status,
             created_by=r.created_by,
             created_by_name=name_map.get(r.created_by, "Unknown"),
@@ -134,7 +124,7 @@ async def list_combined(
             deactivated_at=r.deactivated_at,
             next_review_date=r.next_review_date,
             revision=r.revision,
-            version=r.version,
+            version=float(r.version),
         )
         for r in rows
     ]
@@ -303,7 +293,6 @@ async def list_combined_filtered(
             literal(EVENT).label("item_type"),
             Event.event_name.label("name"),
             literal(None).label("document_type"),
-            (Event.current_media_version.cast(String) + literal(".") + Event.current_revision_number.cast(String)).label("version_display"),
             Event.status.cast(String).label("status"),
             Event.created_by.label("created_by"),
             Event.created_at.label("created_at"),
@@ -311,8 +300,8 @@ async def list_combined_filtered(
             Event.deactivated_by.label("deactivated_by"),
             Event.deactivated_at.label("deactivated_at"),
             literal(None).label("next_review_date"),
-            Event.current_revision_number.label("revision"),
-            Event.current_media_version.label("version"),
+            Event.revision.label("revision"),
+            Event.version.label("version"),
         )
         .select_from(Event)
     )
@@ -338,7 +327,6 @@ async def list_combined_filtered(
             literal(DOCUMENT).label("item_type"),
             Document.name.label("name"),
             Document.document_type.cast(String).label("document_type"),
-            (Document.current_media_version.cast(String) + literal(".") + Document.current_revision_number.cast(String)).label("version_display"),
             Document.status.cast(String).label("status"),
             Document.created_by.label("created_by"),
             Document.created_at.label("created_at"),
@@ -346,7 +334,7 @@ async def list_combined_filtered(
             Document.deactivated_by.label("deactivated_by"),
             Document.deactivated_at.label("deactivated_at"),
             Document.next_review_date.label("next_review_date"),
-            Document.current_revision_number.label("revision"),
+            Document.revision.label("revision"),
             Document.version.label("version"),
         )
         .select_from(Document)
@@ -404,7 +392,6 @@ async def list_combined_filtered(
             id=r.id,
             name=r.name,
             document_type=EVENT if r.item_type == EVENT else (document_type_to_label(r.document_type) or str(r.document_type)),
-            version_display=r.version_display,
             status=r.status,
             created_by=r.created_by,
             created_by_name=name_map.get(r.created_by, "Unknown"),
@@ -415,7 +402,7 @@ async def list_combined_filtered(
             deactivated_at=r.deactivated_at,
             next_review_date=r.next_review_date,
             revision=r.revision,
-            version=r.version,
+            version=float(r.version),
         )
         for r in rows
     ]
@@ -465,13 +452,13 @@ async def list_item_revisions(
     logger.debug("list_item_revisions item_id=%s item_type=%s", item_id, item_type)
 
     if item_type == EVENT:
+        event = await event_service.get_event(db, item_id)
         rows = await revision_service.list_revisions(db, item_id)
         return [
             ItemRevisionListItemOut(
                 id=r.id,
-                media_version=r.media_version,
+                version=float(event.version),
                 revision_number=r.revision_number,
-                version_display=f"{r.media_version}.{r.revision_number}",
                 created_at=r.created_at,
                 change_remarks=getattr(r, "change_remarks", None),
                 event_id=r.event_id,
@@ -480,13 +467,13 @@ async def list_item_revisions(
             for r in rows
         ]
     if item_type == DOCUMENT:
+        document = await document_service.get_document(db, item_id)
         revs = await document_service.list_revisions(db, item_id)
         return [
             ItemRevisionListItemOut(
                 id=r.id,
-                media_version=r.media_version,
+                version=float(document.version),
                 revision_number=r.revision_number,
-                version_display=f"{r.media_version}.{r.revision_number}",
                 created_at=r.created_at,
                 change_remarks=None,
                 event_id=None,
@@ -504,47 +491,48 @@ async def get_item_revision_snapshot(
     db: AsyncSession,
     item_id: int,
     item_type: str,
-    media_version: int,
     revision_number: int,
-) -> RevisionDetailOut | DocumentRevisionDetailOut:
+) -> EventOut | DocumentOut:
     """Load one revision snapshot for an event or document."""
     logger.debug(
-        "get_item_revision_snapshot item_id=%s item_type=%s mv=%s rn=%s",
-        item_id, item_type, media_version, revision_number,
+        "get_item_revision_snapshot item_id=%s item_type=%s rn=%s",
+        item_id, item_type, revision_number,
     )
 
     if item_type == EVENT:
         revision, media_items = await revision_service.get_revision_snapshot(
-            db, item_id, media_version, revision_number
+            db, item_id, revision_number
         )
         event = revision.event
-        rev_out = RevisionOut(
-            id=revision.id,
-            event_id=revision.event_id,
-            media_version=revision.media_version,
-            revision_number=revision.revision_number,
-            version_display=f"{revision.media_version}.{revision.revision_number}",
+        storage = get_storage()
+        return EventOut(
+            id=event.id,
             event_name=revision.event_name,
             sub_event_name=revision.sub_event_name,
             event_dates=revision.event_dates,
             description=revision.description,
             tags=revision.tags,
+            version=float(event.version),
+            revision=revision.revision_number,
+            status=event.status,
+            applicability_type=event.applicability_type,
+            applicability_refs=event.applicability_refs,
+            replaces_document_id=event.replaces_document_id,
+            created_by=event.created_by,
+            created_by_name=revision.creator.username,
+            updated_by=event.updated_by,
+            created_at=event.created_at,
+            updated_at=event.updated_at,
             change_remarks=revision.change_remarks,
             deactivate_remarks=event.deactivate_remarks,
-            status=event.status.value,
-            updated_at=event.updated_at,
-            created_by=revision.created_by,
-            created_by_name=revision.creator.username,
-            created_at=revision.created_at,
-        )
-        storage = get_storage()
-        return RevisionDetailOut(
-            revision=rev_out,
-            media_items=[
-                MediaItemOut(
+            deactivated_by=event.deactivated_by,
+            deactivated_at=event.deactivated_at,
+            like_count=int(getattr(event, "like_count", 0) or 0),
+            liked_by_me=False,
+            files=[
+                MediaFileSummary(
                     id=m.id,
-                    event_id=m.event_id,
-                    media_versions=[media_version],
+                    original_filename=m.original_filename,
                     file_type=m.file_type,
                     file_url=storage.get_read_url(m.file_url),
                     blob_path=m.file_url,
@@ -552,52 +540,65 @@ async def get_item_revision_snapshot(
                     thumbnail_blob_path=m.thumbnail_url,
                     caption=m.caption,
                     description=m.description,
-                    sort_order=m.sort_order,
-                    file_size_bytes=m.file_size_bytes,
-                    original_filename=m.original_filename,
-                    created_at=m.created_at,
+                    media_versions=[],
                 )
                 for m in media_items
             ],
         )
     if item_type == "document":
         revision, files = await document_service.get_revision_snapshot(
-            db, item_id, media_version, revision_number
+            db, item_id, revision_number
         )
         doc = revision.document
-        rev_out = DocumentRevisionOut(
-            id=revision.id,
-            document_id=revision.document_id,
-            media_version=revision.media_version,
-            revision_number=revision.revision_number,
-            version_display=f"{revision.media_version}.{revision.revision_number}",
+        legislation_name = None
+        sub_legislation_name = None
+        if doc.legislation_id is not None:
+            legislation_name = (
+                await db.execute(select(Legislation.name).where(Legislation.id == doc.legislation_id))
+            ).scalar_one_or_none()
+        if doc.sub_legislation_id is not None:
+            sub_legislation_name = (
+                await db.execute(select(SubLegislation.name).where(SubLegislation.id == doc.sub_legislation_id))
+            ).scalar_one_or_none()
+        return DocumentOut(
+            id=doc.id,
             name=revision.name,
             document_type=document_type_to_label(revision.document_type.value),
             tags=revision.tags,
             summary=revision.summary,
+            legislation_id=doc.legislation_id,
+            legislation_name=legislation_name,
+            sub_legislation_id=doc.sub_legislation_id,
+            sub_legislation_name=sub_legislation_name,
+            next_review_date=doc.next_review_date,
+            download_allowed=doc.download_allowed,
             applicability_type=revision.applicability_type,
             applicability_refs=revision.applicability_refs,
+            status=doc.status,
+            version=float(doc.version),
+            revision=revision.revision_number,
             change_remarks=doc.change_remarks,
             deactivate_remarks=doc.deactivate_remarks,
-            status=doc.status.value,
-            updated_at=doc.updated_at,
-            created_by=revision.created_by,
+            deactivated_by=doc.deactivated_by,
+            deactivated_at=doc.deactivated_at,
+            replaces_document_id=doc.replaces_document_id,
+            created_by=doc.created_by,
             created_by_name=revision.creator.username,
-            created_at=revision.created_at,
-        )
-        return DocumentRevisionDetailOut(
-            revision=rev_out,
+            updated_by=doc.updated_by,
+            created_at=doc.created_at,
+            updated_at=doc.updated_at,
             files=[
                 DocumentFileSummary(
                     id=f.id,
                     original_filename=f.original_filename,
                     file_type=f.file_type,
                     file_url=f.file_url,
-                    media_versions=[media_version],
+                    media_versions=[],
                     file_size_bytes=f.file_size_bytes,
                 )
                 for f in files
             ],
+            linked_document_details=None,
         )
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
