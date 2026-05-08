@@ -101,7 +101,7 @@ class EventRevision(BaseEvents):
     event_id: Mapped[int] = mapped_column(
         Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="CASCADE"), nullable=False
     )
-    media_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    media_version: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
     event_name: Mapped[str] = mapped_column(String(255), nullable=False)

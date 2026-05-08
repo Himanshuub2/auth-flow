@@ -17,7 +17,7 @@ def _rev_to_out(rev) -> RevisionOut:
     return RevisionOut(
         id=rev.id,
         event_id=rev.event_id,
-        version=float(event.version),
+        version=event.version,
         revision_number=rev.revision_number,
         event_name=rev.event_name,
         sub_event_name=rev.sub_event_name,
@@ -65,6 +65,7 @@ async def get_revision(
     revision, media_items = await revision_service.get_revision_snapshot(
         db, event_id, revision_number
     )
+    print('revision',revision.media_version,revision.revision_number,'------=====')
     data = RevisionDetailOut(
         revision=_rev_to_out(revision),
         media_items=[

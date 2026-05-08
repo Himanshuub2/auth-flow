@@ -124,7 +124,7 @@ async def list_combined(
             deactivated_at=r.deactivated_at,
             next_review_date=r.next_review_date,
             revision=r.revision,
-            version=float(r.version),
+            version=r.version,
         )
         for r in rows
     ]
@@ -402,7 +402,7 @@ async def list_combined_filtered(
             deactivated_at=r.deactivated_at,
             next_review_date=r.next_review_date,
             revision=r.revision,
-            version=float(r.version),
+            version=r.version,
         )
         for r in rows
     ]
@@ -457,7 +457,7 @@ async def list_item_revisions(
         return [
             ItemRevisionListItemOut(
                 id=r.id,
-                version=float(event.version),
+                version=event.version,
                 revision_number=r.revision_number,
                 created_at=r.created_at,
                 change_remarks=getattr(r, "change_remarks", None),
@@ -472,7 +472,7 @@ async def list_item_revisions(
         return [
             ItemRevisionListItemOut(
                 id=r.id,
-                version=float(document.version),
+                version=document.version,
                 revision_number=r.revision_number,
                 created_at=r.created_at,
                 change_remarks=None,
@@ -512,7 +512,7 @@ async def get_item_revision_snapshot(
             event_dates=revision.event_dates,
             description=revision.description,
             tags=revision.tags,
-            version=float(event.version),
+            version=revision.media_version,
             revision=revision.revision_number,
             status=event.status,
             applicability_type=event.applicability_type,
@@ -575,7 +575,7 @@ async def get_item_revision_snapshot(
             applicability_type=revision.applicability_type,
             applicability_refs=revision.applicability_refs,
             status=doc.status,
-            version=float(doc.version),
+            version=revision.media_version,
             revision=revision.revision_number,
             change_remarks=doc.change_remarks,
             deactivate_remarks=doc.deactivate_remarks,

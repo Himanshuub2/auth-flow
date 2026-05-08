@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import String as SAString, func, literal_column, or_, select
+from sqlalchemy import String as SAString, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, load_only, selectinload
 
@@ -80,7 +80,11 @@ async def save_document(
 ) -> Document:
     is_new = document_id is None
     _check_type_permission(user, payload.document_type)
-    validate_applicability_refs(payload.applicability_type, payload.applicability_refs)
+    validate_applicability_refs(
+        payload.applicability_type,
+        payload.applicability_refs,
+        allow_division=False,
+    )
 
     if is_new:
         doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
@@ -265,7 +269,7 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
         status=doc.status,
-        version=float(doc.version),
+        version=doc.version,
         revision=doc.revision,
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
@@ -492,76 +496,50 @@ HUB_MAX_PAGE_SIZE = 100
 
 
 def _apply_applicability_filter(query, user: CurrentUser, applicability: str | None):
-    """Filter hub/list queries by applicability. Uses JSONB @> where possible (GIN-friendly).
+    """Filter hub queries by applicability.
 
-    - None (default): applicability ALL, or applicability_refs SQL/JSON null, or docs
-      where the user's email / designation / division_cluster appears in applicability_refs.
-    - "ALL": no filter — return everything (admin/explicit override).
-    - "DIVISION": ALL-type docs + DIVISION-type docs matching the user's cluster/designation.
-    - "EMPLOYEE": ALL-type docs + EMPLOYEE-type docs matching the user's email.
+    refs shape (new):
+      DIVISION  -> ["div1", "div2"]
+      EMPLOYEE  -> ["a@x.com", "b@x.com"]
+      ALL       -> null
+
+    Filter values:
+      None / "ALL"  -> records visible to me: ALL-type, OR DIVISION matching my division,
+                       OR EMPLOYEE matching my email.
+      "DIVISION"    -> only DIVISION-type records where my division is in refs.
+      "EMPLOYEE"    -> only EMPLOYEE-type records where my email is in refs.
     """
-    if applicability is not None and applicability.upper() == "ALL":
-        return query
+    kind = (applicability or "").strip().upper() or None
 
-    if applicability is None:
-        # Default hub view: open-to-everyone docs (ALL / missing refs) plus targeted matches.
-        # JSONB may be SQL NULL or the JSON null value ('null'::jsonb); both mean "no refs".
-        refs_open = or_(
-            Document.applicability_refs.is_(None),
-            Document.applicability_refs == literal_column("'null'::jsonb"),
-        )
-        conditions: list = [
-            or_(refs_open, Document.applicability_type == ApplicabilityType.ALL),
-        ]
-
-        # EMPLOYEE match — refs is a JSON array of email strings.
-        if user.email:
-            conditions.append(
-                (Document.applicability_type == ApplicabilityType.EMPLOYEE)
-                & Document.applicability_refs.contains([user.email])
-            )
-
-        # DIVISION match — refs is {"divisions": [...], "designations": [...]}.
-        div_conditions = []
-        if user.division_cluster:
-            div_conditions.append(
-                Document.applicability_refs.contains({"divisions": [user.division_cluster]})
-            )
-        if user.designation:
-            div_conditions.append(
-                Document.applicability_refs.contains({"designations": [user.designation]})
-            )
-        if div_conditions:
-            conditions.append(
-                (Document.applicability_type == ApplicabilityType.DIVISION)
-                & or_(*div_conditions)
-            )
-
-        return query.where(or_(*conditions))
-
-    if applicability.upper() == "DIVISION":
+    if kind == "DIVISION":
         if not user.division_cluster:
-            return query.where(Document.applicability_type == ApplicabilityType.ALL)
-        div_match = Document.applicability_refs.contains({"divisions": [user.division_cluster]})
-        desig_match = Document.applicability_refs.contains({"designations": [user.designation]})
-        ref_match = or_(div_match, desig_match)
+            return query.where(literal(False))
         return query.where(
-            or_(
-                Document.applicability_type == ApplicabilityType.ALL,
-                (Document.applicability_type == ApplicabilityType.DIVISION) & ref_match,
-            )
+            (Document.applicability_type == ApplicabilityType.DIVISION)
+            & Document.applicability_refs.contains([user.division_cluster])
         )
 
-    if applicability.upper() == "EMPLOYEE":
-        ref_match = Document.applicability_refs.contains([user.email])
+    if kind == "EMPLOYEE":
+        if not user.email:
+            return query.where(literal(False))
         return query.where(
-            or_(
-                Document.applicability_type == ApplicabilityType.ALL,
-                (Document.applicability_type == ApplicabilityType.EMPLOYEE) & ref_match,
-            )
+            (Document.applicability_type == ApplicabilityType.EMPLOYEE)
+            & Document.applicability_refs.contains([user.email])
         )
 
-    return query
+    # Default / "ALL": records visible to me.
+    conditions = [Document.applicability_type == ApplicabilityType.ALL]
+    if user.division_cluster:
+        conditions.append(
+            (Document.applicability_type == ApplicabilityType.DIVISION)
+            & Document.applicability_refs.contains([user.division_cluster])
+        )
+    if user.email:
+        conditions.append(
+            (Document.applicability_type == ApplicabilityType.EMPLOYEE)
+            & Document.applicability_refs.contains([user.email])
+        )
+    return query.where(or_(*conditions))
 
 
 def _apply_search_filter(query, search: str | None):
@@ -869,7 +847,7 @@ def build_document_out(
         summary=doc.summary,
         legislation_id=doc.legislation_id,
         sub_legislation_id=doc.sub_legislation_id,
-        version=float(doc.version),
+        version=doc.version,
         next_review_date=doc.next_review_date,
         download_allowed=doc.download_allowed,
         linked_document_ids=doc.linked_document_ids,
@@ -1141,7 +1119,7 @@ async def _publish_document(db: AsyncSession, doc: Document) -> None:
 
     db.add(DocumentRevision(
         document_id=doc.id,
-        media_version=1,
+        media_version=doc.version,
         revision_number=doc.revision,
         name=doc.name,
         document_type=doc.document_type,
@@ -1239,6 +1217,7 @@ def _metadata_changed_vs_revision(doc: Document, last_rev: DocumentRevision) -> 
         or doc.summary != last_rev.summary
         or doc.applicability_type != last_rev.applicability_type
         or doc.applicability_refs != last_rev.applicability_refs
+        or doc.version != last_rev.media_version
     )
 
 

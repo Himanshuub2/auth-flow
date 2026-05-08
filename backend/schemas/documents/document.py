@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, field_validator
 
@@ -109,7 +110,7 @@ class DocumentOut(BaseModel):
     applicability_type: ApplicabilityType
     applicability_refs: dict | list | None
     status: DocumentStatus
-    version: float
+    version: Decimal
     revision: int
     change_remarks: str | None
     deactivate_remarks: str | None
@@ -130,7 +131,7 @@ class DocumentOut(BaseModel):
 class DocumentRevisionOut(BaseModel):
     id: int
     document_id: int
-    version: float
+    version: Decimal
     revision_number: int
     name: str
     document_type: str
@@ -156,7 +157,7 @@ class DocumentRevisionOut(BaseModel):
 class RevisionListItemOut(BaseModel):
     id: int
     document_id: int
-    version: float
+    version: Decimal
     revision_number: int
     created_at: datetime
 

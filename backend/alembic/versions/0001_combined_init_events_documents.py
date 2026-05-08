@@ -95,7 +95,7 @@ def upgrade() -> None:
             ),
             nullable=False,
         ),
-        sa.Column("applicability_refs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("applicability_refs", postgresql.ARRAY(sa.Text()), nullable=True),
         sa.Column("replaces_document_id", sa.Integer(), nullable=True),
         sa.Column("created_by", sa.String(255), nullable=False),
         sa.Column("updated_by", sa.String(255), nullable=True),
@@ -276,7 +276,7 @@ def upgrade() -> None:
             nullable=False,
             server_default="ALL",
         ),
-        sa.Column("applicability_refs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("applicability_refs", postgresql.ARRAY(sa.Text()), nullable=True),
         sa.Column(
             "status",
             postgresql.ENUM(
@@ -335,7 +335,7 @@ def upgrade() -> None:
             nullable=False,
             server_default="ALL",
         ),
-        sa.Column("applicability_refs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("applicability_refs", postgresql.ARRAY(sa.Text()), nullable=True),
         sa.Column("file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
         sa.Column("created_by", sa.String(255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),

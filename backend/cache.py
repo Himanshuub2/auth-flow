@@ -15,6 +15,7 @@ _redis_unavailable = False
 
 
 async def get_redis() -> aioredis.Redis:
+    return
     global _pool, _redis_unavailable
     if _redis_unavailable:
         raise RuntimeError("Redis disabled for current process")

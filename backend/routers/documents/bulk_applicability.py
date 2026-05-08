@@ -42,7 +42,13 @@ async def download_template(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
 ):
-    buf, filename = await svc.generate_template(db, body.selected_types)
+    buf, filename = await svc.generate_template(
+        db,
+        mode=body.mode.value,
+        selected_types=body.selected_types,
+        document_ids=body.document_ids,
+        event_ids=body.event_ids,
+    )
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -18,13 +19,13 @@ class CombinedItemOut(BaseModel):
     deactivated_at: datetime | None = None
     next_review_date: date | None = None
     revision: int
-    version: float
+    version: Decimal
 
 
 class ItemRevisionListItemOut(BaseModel):
     """Unified revision list row for events and documents."""
     id: int
-    version: float
+    version: Decimal
     revision_number: int
     created_at: datetime
     change_remarks: str | None = None

@@ -43,14 +43,15 @@ async def get_revision_snapshot(
             EventRevision.event_id == event_id,
             EventRevision.revision_number == revision_number,
         )
-        .order_by(EventRevision.media_version.desc())
-        .limit(1)
+        # .order_by(EventRevision.media_version.desc())
+        # .limit(1)
         .options(
             selectinload(EventRevision.creator),
             selectinload(EventRevision.event),
         )
     )
     revision = result.scalar_one_or_none()
+    print('revision',revision.media_version,revision.revision_number,'------')
     if not revision:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

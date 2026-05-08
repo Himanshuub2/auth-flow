@@ -58,7 +58,7 @@ def _to_list_out(doc: Document) -> DocumentOut:
         summary=doc.summary,
         legislation_id=doc.legislation_id,
         sub_legislation_id=doc.sub_legislation_id,
-        version=float(doc.version),
+        version=doc.version,
         next_review_date=format_date_dmy_month_abbr(doc.next_review_date) if doc.next_review_date else None,
         download_allowed=doc.download_allowed,
         linked_document_ids=doc.linked_document_ids,
@@ -278,7 +278,7 @@ async def get_revision(
     data = DocumentRevisionOut(
         id=rev.id,
         document_id=rev.document_id,
-        version=float(rev.document.version),
+        version=rev.document.version,
         revision_number=rev.revision_number,
         name=rev.name,
         document_type=document_type_to_label(rev.document_type.value),

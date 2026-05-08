@@ -203,6 +203,85 @@ def test_update_event_not_found(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_update_event_media_with_single_file_metadata_array(client: TestClient) -> None:
+    """Update event media using ids for existing and id=None for new files."""
+    payload = _event_payload(
+        event_name=_uniq("Media Event"),
+        file_metadata=[
+            {
+                "id": None,
+                "original_filename": "old-1.jpg",
+                "blob_path": "events/test/old-1.jpg",
+                "file_type": "IMAGE",
+                "file_size_bytes": 1024,
+                "caption": "old caption 1",
+                "description": "old description 1",
+                "thumbnail_blob_path": "events/test/old-1-thumb.jpg",
+                "thumbnail_size_bytes": 256,
+                "sort_order": 0,
+            },
+            {
+                "id": None,
+                "original_filename": "old-2.jpg",
+                "blob_path": "events/test/old-2.jpg",
+                "file_type": "IMAGE",
+                "file_size_bytes": 1024,
+                "caption": "old caption 2",
+                "description": "old description 2",
+                "thumbnail_blob_path": "events/test/old-2-thumb.jpg",
+                "thumbnail_size_bytes": 256,
+                "sort_order": 1,
+            },
+        ],
+    )
+    create = client.post("/api/events/", json=payload)
+    assert create.status_code == 201
+    event_id = create.json()["data"]["id"]
+
+    detail = client.get(f"/api/events/{event_id}")
+    assert detail.status_code == 200
+    created_files = detail.json()["data"]["files"]
+    assert len(created_files) == 2
+    kept_file_id = created_files[0]["id"]
+
+    update_payload = _event_payload(
+        event_name=payload["event_name"],
+        file_metadata=[
+            {
+                "id": kept_file_id,
+                "original_filename": "old-1.jpg",
+                "file_type": "IMAGE",
+                "caption": "updated caption",
+                "description": "updated description",
+                "sort_order": 0,
+            },
+            {
+                "id": None,
+                "original_filename": "new-1.jpg",
+                "blob_path": "events/test/new-1.jpg",
+                "file_type": "IMAGE",
+                "file_size_bytes": 2048,
+                "caption": "new caption",
+                "description": "new description",
+                "thumbnail_blob_path": "events/test/new-1-thumb.jpg",
+                "thumbnail_size_bytes": 256,
+                "sort_order": 1,
+            },
+        ],
+    )
+    update = client.put(f"/api/events/{event_id}", json=update_payload)
+    assert update.status_code == 200
+
+    updated_detail = client.get(f"/api/events/{event_id}")
+    assert updated_detail.status_code == 200
+    updated_files = updated_detail.json()["data"]["files"]
+    assert len(updated_files) == 2
+
+    kept = next((f for f in updated_files if f["id"] == kept_file_id), None)
+    assert kept is not None
+    assert kept["caption"] == "updated caption"
+    assert kept["description"] == "updated description"
+
 def test_pagination_edge_cases(client: TestClient) -> None:
     """Pagination with edge values."""
     resp = client.get("/api/events/", params={"page": 1, "page_size": 1})

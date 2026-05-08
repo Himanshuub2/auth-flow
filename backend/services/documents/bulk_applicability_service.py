@@ -22,12 +22,14 @@ from models.documents.bulk_applicability import (
 )
 from models.documents.document import (
     Document,
+    DocumentStatus,
     DocumentType,
     DOCUMENT_TYPE_LABELS,
     ApplicabilityType as DocApplicabilityType,
 )
 from models.events.event import (
     Event,
+    EventStatus,
     ApplicabilityType as EventApplicabilityType,
 )
 from models.events.user import User
@@ -65,23 +67,35 @@ def _format_error_for_storage(exc: BaseException) -> str:
 
 async def generate_template(
     db: AsyncSession,
-    selected_types: list[str],
+    *,
+    mode: str,
+    selected_types: list[str] | None = None,
+    document_ids: list[int] | None = None,
+    event_ids: list[int] | None = None,
 ) -> tuple[io.BytesIO, str]:
-    """
-    Build an Excel template in memory and return (bytes_buffer, filename).
-    No Azure storage -- streamed directly to the client.
+    """Build an Excel template in memory and return (bytes_buffer, filename).
+
+    Modes:
+      - ``ALL``: include every active record for each type in ``selected_types``.
+      - ``SPECIFIC``: include only the documents/events whose ids are listed.
     """
     division_columns = await _get_division_columns(db)
     rows: list[dict] = []
 
-    doc_types = [t for t in selected_types if t != "EVENTS"]
-    if doc_types:
-        doc_rows = await _fetch_document_rows(db, doc_types)
-        rows.extend(doc_rows)
-
-    if "EVENTS" in selected_types:
-        event_rows = await _fetch_event_rows(db)
-        rows.extend(event_rows)
+    if (mode or "").upper() == "SPECIFIC":
+        if document_ids:
+            rows.extend(await _fetch_documents_by_ids(db, document_ids))
+        if event_ids:
+            rows.extend(await _fetch_events_by_ids(db, event_ids))
+        filename = _specific_filename(document_ids, event_ids)
+    else:
+        types = selected_types or []
+        doc_types = [t for t in types if t != "EVENTS"]
+        if doc_types:
+            rows.extend(await _fetch_active_document_rows(db, doc_types))
+        if "EVENTS" in types:
+            rows.extend(await _fetch_active_event_rows(db))
+        filename = _all_filename(types)
 
     wb = Workbook()
     ws = wb.active
@@ -95,13 +109,24 @@ async def generate_template(
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
+    return buf, filename
 
+
+def _all_filename(selected_types: list[str]) -> str:
     type_label = "_".join(t.lower() for t in selected_types[:3])
     if len(selected_types) > 3:
         type_label += f"_and_{len(selected_types) - 3}_more"
-    filename = f"bulk_applicability_template_{type_label}.xlsx"
+    return f"bulk_applicability_template_{type_label or 'all'}.xlsx"
 
-    return buf, filename
+
+def _specific_filename(document_ids: list[int] | None, event_ids: list[int] | None) -> str:
+    parts: list[str] = []
+    if document_ids:
+        parts.append(f"docs{len(document_ids)}")
+    if event_ids:
+        parts.append(f"events{len(event_ids)}")
+    label = "_".join(parts) or "specific"
+    return f"bulk_applicability_template_{label}.xlsx"
 
 
 async def create_upload_request(
@@ -491,7 +516,25 @@ async def _has_users_org_vertical_column(db: AsyncSession) -> bool:
     return q.first() is not None
 
 
-async def _fetch_document_rows(
+def _document_row(r) -> dict:
+    return {
+        "id": r.id,
+        "type": DOCUMENT_TYPE_LABELS.get(r.document_type, r.document_type.value),
+        "name": r.name,
+        "updated_at": r.updated_at,
+    }
+
+
+def _event_row(r) -> dict:
+    return {
+        "id": r.id,
+        "type": "Events",
+        "name": r.event_name,
+        "updated_at": r.updated_at,
+    }
+
+
+async def _fetch_active_document_rows(
     db: AsyncSession, doc_types: list[str]
 ) -> list[dict]:
     type_enums = [DocumentType(t) for t in doc_types]
@@ -502,37 +545,61 @@ async def _fetch_document_rows(
             Document.document_type,
             Document.updated_at,
         )
-        .where(Document.document_type.in_(type_enums))
+        .where(
+            Document.document_type.in_(type_enums),
+            Document.status == DocumentStatus.ACTIVE,
+            Document.replaces_document_id.is_(None),
+        )
         .order_by(Document.document_type, Document.id)
     )
-    rows = []
-    for r in result.all():
-        rows.append({
-            "id": r.id,
-            "type": DOCUMENT_TYPE_LABELS.get(r.document_type, r.document_type.value),
-            "name": r.name,
-            "updated_at": r.updated_at,
-        })
-    return rows
+    return [_document_row(r) for r in result.all()]
 
 
-async def _fetch_event_rows(db: AsyncSession) -> list[dict]:
+async def _fetch_active_event_rows(db: AsyncSession) -> list[dict]:
     result = await db.execute(
         select(
             Event.id,
             Event.event_name,
             Event.updated_at,
-        ).order_by(Event.id)
+        )
+        .where(
+            Event.status == EventStatus.ACTIVE,
+            Event.replaces_document_id.is_(None),
+        )
+        .order_by(Event.id)
     )
-    rows = []
-    for r in result.all():
-        rows.append({
-            "id": r.id,
-            "type": "Events",
-            "name": r.event_name,
-            "updated_at": r.updated_at,
-        })
-    return rows
+    return [_event_row(r) for r in result.all()]
+
+
+async def _fetch_documents_by_ids(
+    db: AsyncSession, document_ids: list[int]
+) -> list[dict]:
+    result = await db.execute(
+        select(
+            Document.id,
+            Document.name,
+            Document.document_type,
+            Document.updated_at,
+        )
+        .where(Document.id.in_(document_ids))
+        .order_by(Document.document_type, Document.id)
+    )
+    return [_document_row(r) for r in result.all()]
+
+
+async def _fetch_events_by_ids(
+    db: AsyncSession, event_ids: list[int]
+) -> list[dict]:
+    result = await db.execute(
+        select(
+            Event.id,
+            Event.event_name,
+            Event.updated_at,
+        )
+        .where(Event.id.in_(event_ids))
+        .order_by(Event.id)
+    )
+    return [_event_row(r) for r in result.all()]
 
 
 def _write_reference_row(
@@ -665,7 +732,7 @@ async def _apply_bulk_updates(
 
         if divisions:
             app_type = "DIVISION"
-            app_refs = {"divisions": divisions, "designations": []}
+            app_refs = list(divisions)
         else:
             app_type = "ALL"
             app_refs = None

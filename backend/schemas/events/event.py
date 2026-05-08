@@ -1,6 +1,7 @@
 from datetime import datetime
+from decimal import Decimal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from models.events.event import ApplicabilityType, EventStatus
 from models.events.event_media_item import FileType
@@ -8,15 +9,25 @@ from models.events.event_media_item import FileType
 
 class FileMetadataIn(BaseModel):
     """Per-file metadata sent when saving an event. blob_path is the Azure path where FE uploaded the file."""
+    id: int | None = None
     original_filename: str
-    blob_path: str
+    blob_path: str | None = None
     file_type: FileType
-    file_size_bytes: int
+    file_size_bytes: int | None = None
     caption: str | None = None
     description: str | None = None
     thumbnail_blob_path: str | None = None
     thumbnail_size_bytes: int | None = None
     sort_order: int = 0
+
+    @model_validator(mode="after")
+    def validate_new_file_fields(self) -> "FileMetadataIn":
+        if self.id is None:
+            if not self.blob_path:
+                raise ValueError("blob_path is required when id is null")
+            if self.file_size_bytes is None:
+                raise ValueError("file_size_bytes is required when id is null")
+        return self
 
 
 class EventSavePayload(BaseModel):
@@ -28,7 +39,6 @@ class EventSavePayload(BaseModel):
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
     applicability_refs: dict | list | None = None
     status: EventStatus = EventStatus.DRAFT
-    selected_file_ids: list[int] | None = None
     file_metadata: list[FileMetadataIn] | None = None
     change_remarks: str | None = None
     version: float = 1.0
@@ -100,7 +110,7 @@ class EventOut(BaseModel):
     event_dates: list | dict | None
     description: str | None
     tags: list | None
-    version: float
+    version: Decimal
     revision: int
     status: EventStatus
     applicability_type: ApplicabilityType
@@ -125,7 +135,7 @@ class EventOut(BaseModel):
 class RevisionOut(BaseModel):
     id: int
     event_id: int
-    version: float
+    version: Decimal
     revision_number: int
     event_name: str
     sub_event_name: str | None
@@ -148,7 +158,7 @@ class RevisionListItemOut(BaseModel):
 
     id: int
     event_id: int
-    version: float
+    version: Decimal
     revision_number: int
     change_remarks: str | None = None
     created_at: datetime

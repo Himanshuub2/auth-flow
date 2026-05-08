@@ -198,7 +198,7 @@ class DocumentRevision(BaseDocuments):
     document_id: Mapped[int] = mapped_column(
         Integer, ForeignKey(f"{SCHEMA}.documents.id", ondelete="CASCADE"), nullable=False,
     )
-    media_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    media_version: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)

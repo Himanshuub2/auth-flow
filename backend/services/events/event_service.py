@@ -38,7 +38,11 @@ async def save_event(
     *,
     event_id: int | None = None,
 ) -> Event:
-    validate_applicability_refs(payload.applicability_type, payload.applicability_refs)
+    validate_applicability_refs(
+        payload.applicability_type,
+        payload.applicability_refs,
+        allow_division=False,
+    )
     is_new = event_id is None
 
     if is_new:
@@ -58,8 +62,8 @@ async def save_event(
                     detail="change_remarks is required when activating an edit",
                 )
 
-    if not is_new and payload.version != float(event.version):
-        await _validate_version_unique(db, payload.version, exclude_id=event.id)
+    # if not is_new and payload.version != float(event.version):
+    #     await _validate_version_unique(db, payload.version, exclude_id=event.id)
 
     event.event_name = payload.event_name
     event.sub_event_name = payload.sub_event_name
@@ -71,14 +75,7 @@ async def save_event(
     event.change_remarks = payload.change_remarks
     event.version = payload.version
 
-    if payload.selected_file_ids is not None:
-        await _sync_media_from_metadata(
-            db,
-            event,
-            payload.file_metadata or [],
-            selected_file_ids=payload.selected_file_ids,
-        )
-    elif payload.file_metadata is not None:
+    if payload.file_metadata is not None:
         await _sync_media_from_metadata(db, event, payload.file_metadata)
 
     if payload.status == EventStatus.ACTIVE:
@@ -196,7 +193,7 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         event_dates=event.event_dates,
         description=event.description,
         tags=event.tags,
-        version=float(event.version),
+        version=event.version,
         revision=event.revision,
         status=event.status,
         applicability_type=event.applicability_type,
@@ -234,7 +231,7 @@ def build_event_out(event: Event, *, liked_by_me: bool = False) -> EventOut:
         event_dates=event.event_dates,
         description=event.description,
         tags=event.tags,
-        version=float(event.version),
+        version=event.version,
         revision=event.revision,
         status=event.status,
         applicability_type=event.applicability_type,
@@ -390,7 +387,6 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: str) ->
 
     parent_files = await _get_all_files(db, parent.id)
     parent_file_by_id = {f.id: f for f in parent_files}
-
     draft = Event(
         event_name=parent.event_name,
         sub_event_name=parent.sub_event_name,
@@ -454,7 +450,7 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
 
     db.add(EventRevision(
         event_id=event.id,
-        media_version=1,
+        media_version=event.version,
         revision_number=event.revision,
         event_name=event.event_name,
         sub_event_name=event.sub_event_name,
@@ -562,6 +558,7 @@ def _non_name_metadata_changed_vs_revision(event: Event, last_rev: EventRevision
         or event.description != last_rev.description
         or event.tags != last_rev.tags
         or event.change_remarks != last_rev.change_remarks
+        or event.version != last_rev.media_version
     )
 
 
@@ -597,20 +594,42 @@ async def _get_current_file_ids(db: AsyncSession, event: Event) -> list[int]:
     return list(event.staging_file_ids or [])
 
 
-async def _get_names_from_file_ids(db: AsyncSession, event_id: int, file_ids: list[int]) -> set[str]:
+async def _get_media_signatures_from_file_ids(
+    db: AsyncSession, event_id: int, file_ids: list[int],
+) -> list[tuple]:
     if not file_ids:
-        return set()
+        return []
     all_files = await _get_all_files(db, event_id)
     file_by_id = {f.id: f for f in all_files}
-    return {file_by_id[fid].original_filename for fid in file_ids if fid in file_by_id}
+    signatures: list[tuple] = []
+    for fid in file_ids:
+        media = file_by_id.get(fid)
+        if media is None:
+            continue
+        signatures.append(
+            (
+                media.original_filename,
+                media.file_type.value,
+                media.caption,
+                media.description,
+                media.sort_order,
+                media.file_url,
+                media.thumbnail_url,
+            )
+        )
+    return signatures
 
 
 async def _staging_files_differ_from_revision(
     db: AsyncSession, event: Event, last_rev: EventRevision,
 ) -> bool:
-    staging_names = await _get_names_from_file_ids(db, event.id, list(event.staging_file_ids or []))
-    rev_names = await _get_names_from_file_ids(db, event.id, list(last_rev.file_ids or []))
-    return staging_names != rev_names
+    staging_signatures = await _get_media_signatures_from_file_ids(
+        db, event.id, list(event.staging_file_ids or []),
+    )
+    revision_signatures = await _get_media_signatures_from_file_ids(
+        db, event.id, list(last_rev.file_ids or []),
+    )
+    return staging_signatures != revision_signatures
 
 
 async def _validate_version_unique(db: AsyncSession, version: float, *, exclude_id: int | None = None) -> None:
@@ -625,43 +644,27 @@ async def _validate_version_unique(db: AsyncSession, version: float, *, exclude_
         )
 
 
-def _validate_event_media_limits(
-    file_metadata: list[FileMetadataIn],
-    existing_files: list[EventMediaItem],
-    selected_file_ids: list[int] | None,
-) -> None:
+def _validate_event_media_limits(final_files: list[EventMediaItem], new_files: list[FileMetadataIn]) -> None:
     """
-    Validate per-event media limits before any rows are created.
-    Final staging set = kept existing files (selected_file_ids) + ALL file_metadata.
+    Validate per-event media limits for the final file composition.
     """
-    existing_id_set = {f.id for f in existing_files}
+    total_images = sum(1 for f in final_files if f.file_type == FileType.IMAGE)
+    total_videos = sum(1 for f in final_files if f.file_type == FileType.VIDEO)
+    total_thumbnails = sum(1 for f in final_files if f.thumbnail_url)
 
-    kept_files: list[EventMediaItem] = []
-    if selected_file_ids is not None:
-        kept_id_set = {fid for fid in selected_file_ids if fid in existing_id_set}
-        kept_files = [f for f in existing_files if f.id in kept_id_set]
-
-    total_images = sum(1 for f in kept_files if f.file_type == FileType.IMAGE)
-    total_videos = sum(1 for f in kept_files if f.file_type == FileType.VIDEO)
-    total_thumbnails = sum(1 for f in kept_files if f.thumbnail_url)
-
-    for meta in file_metadata:
-        if meta.file_type == FileType.IMAGE:
-            total_images += 1
+    for meta in new_files:
+        if meta.file_type == FileType.IMAGE and meta.file_size_bytes is not None:
             if meta.file_size_bytes > MAX_EVENT_IMAGE_SIZE_BYTES:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Image '{meta.original_filename}' exceeds the {MAX_EVENT_IMAGE_SIZE_BYTES // (1024 * 1024)}MB limit",
                 )
-        elif meta.file_type == FileType.VIDEO:
-            total_videos += 1
+        elif meta.file_type == FileType.VIDEO and meta.file_size_bytes is not None:
             if meta.file_size_bytes > MAX_EVENT_VIDEO_SIZE_BYTES:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Video '{meta.original_filename}' exceeds the {MAX_EVENT_VIDEO_SIZE_BYTES // (1024 * 1024)}MB limit",
                 )
-        if meta.thumbnail_blob_path:
-            total_thumbnails += 1
 
     if total_images > MAX_EVENT_IMAGES:
         raise HTTPException(
@@ -684,79 +687,123 @@ async def _sync_media_from_metadata(
     db: AsyncSession,
     event: Event,
     file_metadata: list[FileMetadataIn],
-    *,
-    selected_file_ids: list[int] | None = None,
 ) -> None:
     """
-    Sync EventMediaItem rows from FE-provided file_metadata (blob paths).
+    Sync event files based on the payload.
 
-    **Create** (selected_file_ids is None):
-        staging = all file_metadata items (new rows created from blob paths).
+    - id present  → keep that file, update caption/description/etc.
+    - id is null  → create a new file
+    - existing files not in payload → remove them
 
-    **Update** (selected_file_ids provided):
-        staging = selected_file_ids (existing files to keep)
-                + all files referenced by file_metadata.
-        This means metadata can append files even when selected_file_ids is empty.
+    For drafts of active events the FE may send parent file IDs.
+    We resolve them to existing draft copies (made by _get_or_create_draft).
     """
     existing_files = await _get_all_files(db, event.id)
-    existing_id_set = {f.id for f in existing_files}
+    existing_by_id: dict[int, EventMediaItem] = {f.id: f for f in existing_files}
 
-    _validate_event_media_limits(file_metadata, existing_files, selected_file_ids)
+    # For drafts, load parent files so we can resolve parent IDs
+    parent_by_id: dict[int, EventMediaItem] = {}
+    parent_blob_paths: set[str] = set()
+    if event.replaces_document_id is not None:
+        parent_files = await _get_all_files(db, event.replaces_document_id)
+        parent_by_id = {f.id: f for f in parent_files}
+        for pf in parent_files:
+            if pf.file_url:
+                parent_blob_paths.add(pf.file_url)
+            if pf.thumbnail_url:
+                parent_blob_paths.add(pf.thumbnail_url)
 
-    all_metadata_ids: list[int] = []
+    desired_ids: list[int] = []
+    seen: set[int] = set()
+    new_file_metas: list[FileMetadataIn] = []
 
     for idx, meta in enumerate(file_metadata):
-        item = EventMediaItem(
-            event_id=event.id,
-            file_type=meta.file_type,
-            file_url=meta.blob_path,
-            thumbnail_url=meta.thumbnail_blob_path,
-            caption=meta.caption,
-            description=meta.description,
-            sort_order=meta.sort_order if meta.sort_order else idx,
-            file_size_bytes=meta.file_size_bytes,
-            original_filename=meta.original_filename,
-        )
-        db.add(item)
-        await db.flush()
-        all_metadata_ids.append(item.id)
+        order = meta.sort_order or idx
 
-    if selected_file_ids is None:
-        event.staging_file_ids = all_metadata_ids
-        logger.debug("Synced %d media items for event %s from metadata", len(file_metadata), event.id)
-        return
+        if meta.id is not None:
+            file = existing_by_id.get(meta.id)
 
-    kept_id_set = {fid for fid in selected_file_ids if fid in existing_id_set}
-    desired_staging_ids: list[int] = []
-    seen_ids: set[int] = set()
+            # Parent file ID → find draft copy by matching file_url
+            if file is None and meta.id in parent_by_id:
+                pf = parent_by_id[meta.id]
+                file = next(
+                    (f for f in existing_files if f.file_url == pf.file_url),
+                    None,
+                )
+                if file is None:
+                    file = EventMediaItem(
+                        event_id=event.id,
+                        file_type=pf.file_type,
+                        file_url=pf.file_url,
+                        thumbnail_url=pf.thumbnail_url,
+                        caption=pf.caption,
+                        description=pf.description,
+                        sort_order=pf.sort_order,
+                        file_size_bytes=pf.file_size_bytes,
+                        original_filename=pf.original_filename,
+                    )
+                    db.add(file)
+                    await db.flush()
+                existing_by_id[file.id] = file
 
-    for fid in selected_file_ids:
-        if fid in existing_id_set and fid not in seen_ids:
-            desired_staging_ids.append(fid)
-            seen_ids.add(fid)
+            if file is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File id {meta.id} not found for this event",
+                )
 
-    for fid in all_metadata_ids:
-        if fid not in seen_ids:
-            desired_staging_ids.append(fid)
-            seen_ids.add(fid)
+            file.file_type = meta.file_type
+            file.caption = meta.caption
+            file.description = meta.description
+            file.original_filename = meta.original_filename
+            file.sort_order = order
+            if meta.thumbnail_blob_path is not None:
+                file.thumbnail_url = meta.thumbnail_blob_path
+            if meta.file_size_bytes is not None:
+                file.file_size_bytes = meta.file_size_bytes
 
-    if event.status == EventStatus.DRAFT:
-        removed = [f for f in existing_files if f.id not in kept_id_set]
-        if removed:
-            storage = get_storage()
-            for f in removed:
-                if f.file_url:
-                    await storage.delete(f.file_url)
-                if f.thumbnail_url:
-                    await storage.delete(f.thumbnail_url)
-                await db.delete(f)
-            logger.debug(
-                "Deleted %d removed media items (DB + blob) for draft event %s",
-                len(removed), event.id,
+            if file.id not in seen:
+                desired_ids.append(file.id)
+                seen.add(file.id)
+        else:
+            file = EventMediaItem(
+                event_id=event.id,
+                file_type=meta.file_type,
+                file_url=meta.blob_path or "",
+                thumbnail_url=meta.thumbnail_blob_path,
+                caption=meta.caption,
+                description=meta.description,
+                sort_order=order,
+                file_size_bytes=meta.file_size_bytes or 0,
+                original_filename=meta.original_filename,
             )
+            db.add(file)
+            await db.flush()
+            desired_ids.append(file.id)
+            seen.add(file.id)
+            existing_by_id[file.id] = file
+            new_file_metas.append(meta)
 
-    event.staging_file_ids = desired_staging_ids
-    logger.debug("Synced %d media items for event %s (kept + metadata)", len(desired_staging_ids), event.id)
+    # Validate limits on the final set
+    final_files = [existing_by_id[fid] for fid in desired_ids]
+    _validate_event_media_limits(final_files, new_file_metas)
+
+    # Remove files not present in payload
+    removed = [f for f in existing_files if f.id not in seen]
+
+    if event.status == EventStatus.DRAFT and removed:
+        storage = get_storage()
+        for f in removed:
+            # Don't delete blobs shared with parent event
+            if f.file_url and f.file_url not in parent_blob_paths:
+                await storage.delete(f.file_url)
+            if f.thumbnail_url and f.thumbnail_url not in parent_blob_paths:
+                await storage.delete(f.thumbnail_url)
+            await db.delete(f)
+        logger.debug("Removed %d files from draft event %s", len(removed), event.id)
+
+    event.staging_file_ids = desired_ids
+    logger.debug("Synced %d media items for event %s", len(desired_ids), event.id)
 
 
 async def _validate_active_event_name_uniqueness(
