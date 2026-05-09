@@ -86,6 +86,7 @@ async def save_document(
         allow_division=False,
     )
 
+    parent_to_draft_id: dict[int, int] = {}
     if is_new:
         doc = Document(created_by=user.id, name=payload.name, document_type=payload.document_type, tags=payload.tags)
         db.add(doc)
@@ -96,7 +97,7 @@ async def save_document(
 
     if not is_new:
         if doc.status == DocumentStatus.ACTIVE and payload.status == DocumentStatus.DRAFT:
-            doc = await _get_or_create_draft(db, doc, user.id)
+            doc, parent_to_draft_id = await _get_or_create_draft(db, doc, user.id)
         elif doc.status == DocumentStatus.ACTIVE and payload.status == DocumentStatus.ACTIVE:
             if doc.replaces_document_id is None and (not payload.change_remarks or not payload.change_remarks.strip()):
                 raise HTTPException(
@@ -144,7 +145,7 @@ async def save_document(
 
     if payload.selected_file_ids is not None:
         all_ids = list(dict.fromkeys([*payload.selected_file_ids, *uploaded_ids]))
-        await _sync_staging(db, doc, all_ids)
+        await _sync_staging(db, doc, all_ids, parent_to_draft_id=parent_to_draft_id)
     elif uploaded_ids:
         existing_staging = list(doc.staging_file_ids or [])
         for fid in uploaded_ids:
@@ -445,7 +446,7 @@ async def create_draft_from_document(db: AsyncSession, parent_id: int, user_id: 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Can only create drafts from active documents",
         )
-    draft = await _get_or_create_draft(db, parent, user_id)
+    draft, _ = await _get_or_create_draft(db, parent, user_id)
     await db.refresh(draft)
     return draft
 
@@ -1046,7 +1047,15 @@ async def _validate_linked_ids(
             )
 
 
-async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str) -> Document:
+async def _get_or_create_draft(
+    db: AsyncSession, parent: Document, user_id: str,
+) -> tuple[Document, dict[int, int]]:
+    """
+    Return (draft, parent_to_draft_id_map).
+
+    Maps each parent DocumentFile id → the draft copy id. Empty dict when
+    reusing an existing draft (caller resolves parent IDs via _sync_staging fallback).
+    """
     existing = (await db.execute(
         select(Document).where(
             Document.replaces_document_id == parent.id,
@@ -1054,7 +1063,7 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
         )
     )).scalar_one_or_none()
     if existing:
-        return existing
+        return existing, {}
 
     parent_file_ids = await _get_current_file_ids(db, parent)
 
@@ -1083,10 +1092,12 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
     await db.flush()
 
     new_files: list[DocumentFile] = []
+    parent_ids_for_new_files: list[int] = []
     for fid in parent_file_ids:
         pf = parent_file_by_id.get(fid)
         if not pf:
             continue
+        parent_ids_for_new_files.append(fid)
         new_file = DocumentFile(
             document_id=draft.id,
             file_type=pf.file_type,
@@ -1098,8 +1109,9 @@ async def _get_or_create_draft(db: AsyncSession, parent: Document, user_id: str)
         db.add(new_file)
         new_files.append(new_file)
     await db.flush()
+    parent_to_draft_id = {pid: nf.id for pid, nf in zip(parent_ids_for_new_files, new_files)}
     draft.staging_file_ids = [f.id for f in new_files]
-    return draft
+    return draft, parent_to_draft_id
 
 
 
@@ -1288,14 +1300,45 @@ async def _validate_version_unique(db: AsyncSession, version: float, *, exclude_
 
 async def _sync_staging(
     db: AsyncSession, doc: Document, selected_ids: list[int],
+    *,
+    parent_to_draft_id: dict[int, int] | None = None,
 ) -> None:
-    """Make staging match exactly the selected file IDs."""
+    """
+    Make staging match exactly the selected file IDs.
+
+    IDs may refer to this document's files or, when editing a draft of an active
+    parent, the parent's file IDs. parent_to_draft_id maps parent id → draft copy
+    (from _get_or_create_draft). When absent, parent ids are resolved by file_url.
+    """
     all_files = await _get_all_files(db, doc.id)
     valid_ids = {f.id for f in all_files}
+    draft_id_by_url: dict[str, int] = {f.file_url: f.id for f in all_files if f.file_url}
+
+    parent_by_id: dict[int, DocumentFile] = {}
+    if doc.replaces_document_id is not None:
+        parent_files = await _get_all_files(db, doc.replaces_document_id)
+        parent_by_id = {f.id: f for f in parent_files}
+
+    def resolve_to_draft_file_id(fid: int) -> int | None:
+        if fid in valid_ids:
+            return fid
+        mapped: int | None = None
+        if parent_to_draft_id:
+            mapped = parent_to_draft_id.get(fid)
+        if mapped is not None and mapped in valid_ids:
+            return mapped
+        pf = parent_by_id.get(fid)
+        if pf is not None and pf.file_url:
+            by_url = draft_id_by_url.get(pf.file_url)
+            if by_url is not None:
+                return by_url
+        return None
+
     new_staging: list[int] = []
     seen: set[int] = set()
     for fid in selected_ids:
-        if fid in valid_ids and fid not in seen:
-            new_staging.append(fid)
-            seen.add(fid)
+        resolved = resolve_to_draft_file_id(fid)
+        if resolved is not None and resolved not in seen:
+            new_staging.append(resolved)
+            seen.add(resolved)
     doc.staging_file_ids = new_staging
