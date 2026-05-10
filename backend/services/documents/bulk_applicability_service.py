@@ -50,6 +50,15 @@ MAX_BULK_APPLICABILITY_SCAN_ROWS = 500_000
 # Fewer round-trips than one UPDATE per row; keeps bind parameter batches bounded.
 _BULK_UPDATE_CHUNK = 500
 
+_BULK_APP_VALUES = frozenset({"ALL", "DIVISION"})
+_DOC_APPLICABILITY_FOR_FILTER = (DocApplicabilityType.ALL, DocApplicabilityType.DIVISION)
+_EVT_APPLICABILITY_FOR_FILTER = (EventApplicabilityType.ALL, EventApplicabilityType.DIVISION)
+
+
+def _is_division_applicability(app_type: object) -> bool:
+    v = getattr(app_type, "value", app_type)
+    return v == "DIVISION"
+
 
 def _format_error_for_storage(exc: BaseException) -> str:
     """User-readable text stored on BulkApplicabilityRequest.error_message."""
@@ -103,7 +112,7 @@ async def generate_template(
 
     _write_reference_row(ws, division_columns)
     _write_header_row(ws, division_columns)
-    _write_data_rows(ws, rows)
+    _write_data_rows(ws, rows, division_columns)
     _apply_styles(ws, division_columns, len(rows))
 
     buf = io.BytesIO()
@@ -480,15 +489,7 @@ async def _get_division_columns(db: AsyncSession) -> list[tuple[str, str]]:
     Returns ordered (organization_vertical, division_cluster) pairs.
     Row 1 uses organization_vertical (reference only), row 2 uses division_cluster headers.
     """
-    if await _has_users_org_vertical_column(db):
-        result = await db.execute(
-            select(User.organization_vertical, User.division_cluster)
-            .where(User.division_cluster.isnot(None))
-            .where(User.division_cluster != "")
-            .distinct()
-            .order_by(User.organization_vertical, User.division_cluster)
-        )
-        return [(row[0] or "", row[1]) for row in result.all()]
+
 
     result = await db.execute(
         select(User.division_cluster)
@@ -500,37 +501,33 @@ async def _get_division_columns(db: AsyncSession) -> list[tuple[str, str]]:
     return [("", row[0]) for row in result.all()]
 
 
-async def _has_users_org_vertical_column(db: AsyncSession) -> bool:
-    q = await db.execute(
-        text(
-            """
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'users'
-              AND table_name = 'users'
-              AND column_name = 'organization_vertical'
-            LIMIT 1
-            """
-        )
-    )
-    return q.first() is not None
 
 
 def _document_row(r) -> dict:
+    refs = r.applicability_refs
+    if refs is not None:
+        refs = list(refs)
     return {
         "id": r.id,
         "type": DOCUMENT_TYPE_LABELS.get(r.document_type, r.document_type.value),
         "name": r.name,
         "updated_at": r.updated_at,
+        "applicability_type": r.applicability_type,
+        "applicability_refs": refs,
     }
 
 
 def _event_row(r) -> dict:
+    refs = r.applicability_refs
+    if refs is not None:
+        refs = list(refs)
     return {
         "id": r.id,
         "type": "Events",
         "name": r.event_name,
         "updated_at": r.updated_at,
+        "applicability_type": r.applicability_type,
+        "applicability_refs": refs,
     }
 
 
@@ -544,11 +541,14 @@ async def _fetch_active_document_rows(
             Document.name,
             Document.document_type,
             Document.updated_at,
+            Document.applicability_type,
+            Document.applicability_refs,
         )
         .where(
             Document.document_type.in_(type_enums),
             Document.status == DocumentStatus.ACTIVE,
             Document.replaces_document_id.is_(None),
+            Document.applicability_type.in_(_DOC_APPLICABILITY_FOR_FILTER),
         )
         .order_by(Document.document_type, Document.id)
     )
@@ -561,10 +561,13 @@ async def _fetch_active_event_rows(db: AsyncSession) -> list[dict]:
             Event.id,
             Event.event_name,
             Event.updated_at,
+            Event.applicability_type,
+            Event.applicability_refs,
         )
         .where(
             Event.status == EventStatus.ACTIVE,
             Event.replaces_document_id.is_(None),
+            Event.applicability_type.in_(_EVT_APPLICABILITY_FOR_FILTER),
         )
         .order_by(Event.id)
     )
@@ -580,8 +583,13 @@ async def _fetch_documents_by_ids(
             Document.name,
             Document.document_type,
             Document.updated_at,
+            Document.applicability_type,
+            Document.applicability_refs,
         )
-        .where(Document.id.in_(document_ids))
+        .where(
+            Document.id.in_(document_ids),
+            Document.applicability_type.in_(_DOC_APPLICABILITY_FOR_FILTER),
+        )
         .order_by(Document.document_type, Document.id)
     )
     return [_document_row(r) for r in result.all()]
@@ -595,8 +603,13 @@ async def _fetch_events_by_ids(
             Event.id,
             Event.event_name,
             Event.updated_at,
+            Event.applicability_type,
+            Event.applicability_refs,
         )
-        .where(Event.id.in_(event_ids))
+        .where(
+            Event.id.in_(event_ids),
+            Event.applicability_type.in_(_EVT_APPLICABILITY_FOR_FILTER),
+        )
         .order_by(Event.id)
     )
     return [_event_row(r) for r in result.all()]
@@ -630,18 +643,33 @@ def _write_header_row(
         ws.cell(row=2, column=col_idx, value=header)
 
 
-def _write_data_rows(ws, rows: list[dict]) -> None:
-    """Row 3+: data rows with fixed columns pre-filled, division columns empty."""
+def _write_data_rows(
+    ws,
+    rows: list[dict],
+    division_columns: list[tuple[str, str]],
+) -> None:
+    """Row 3+: fixed columns + division grid (Y only where DIVISION refs match column; ALL → blank)."""
     for row_idx, row_data in enumerate(rows, start=3):
         ws.cell(row=row_idx, column=1, value=row_data["id"])
         ws.cell(row=row_idx, column=2, value=row_data["type"])
         ws.cell(row=row_idx, column=3, value=row_data["name"])
         updated = row_data.get("updated_at")
-        
+
         if isinstance(updated, datetime):
             ws.cell(row=row_idx, column=4, value=format_date_dmy_month_abbr(updated))
         else:
             ws.cell(row=row_idx, column=4, value=str(updated) if updated else "")
+
+        refs_raw = row_data.get("applicability_refs") or []
+        ref_set = {str(r).strip() for r in refs_raw if r is not None and str(r).strip()}
+        is_div = _is_division_applicability(row_data.get("applicability_type"))
+
+        for i, (_vertical, division_cluster) in enumerate(division_columns):
+            col = len(FIXED_COLUMNS) + 1 + i
+            cell_val = ""
+            if is_div and division_cluster in ref_set:
+                cell_val = "Y"
+            ws.cell(row=row_idx, column=col, value=cell_val)
 
 
 def _apply_styles(
@@ -714,6 +742,44 @@ def _resolve_type(raw_type: str) -> tuple[str, str]:
     raise ValueError(f"Unknown type '{raw_type}'")
 
 
+async def _ensure_bulk_targets_all_or_division(
+    db: AsyncSession,
+    doc_updates: list[dict],
+    event_updates: list[dict],
+) -> None:
+    """Reject EMPLOYEE (or anything other than ALL/DIVISION) for targeted rows."""
+    if doc_updates:
+        ids = list({u["id"] for u in doc_updates})
+        r = await db.execute(
+            select(Document.id, Document.applicability_type).where(Document.id.in_(ids))
+        )
+        bad = [
+            row.id
+            for row in r.all()
+            if row.applicability_type.value not in _BULK_APP_VALUES
+        ]
+        if bad:
+            raise ValueError(
+                "Bulk applicability only updates records with applicability ALL or DIVISION. "
+                f"Unsupported document IDs: {sorted(bad)}"
+            )
+    if event_updates:
+        ids = list({u["id"] for u in event_updates})
+        r = await db.execute(
+            select(Event.id, Event.applicability_type).where(Event.id.in_(ids))
+        )
+        bad = [
+            row.id
+            for row in r.all()
+            if row.applicability_type.value not in _BULK_APP_VALUES
+        ]
+        if bad:
+            raise ValueError(
+                "Bulk applicability only updates records with applicability ALL or DIVISION. "
+                f"Unsupported event IDs: {sorted(bad)}"
+            )
+
+
 async def _apply_bulk_updates(
     db: AsyncSession,
     rows: list[dict],
@@ -751,10 +817,14 @@ async def _apply_bulk_updates(
 
     if doc_updates:
         await _validate_ids_exist(db, Document, [u["id"] for u in doc_updates], "document")
-        await _batch_update_documents(db, doc_updates, user_id)
-
     if event_updates:
         await _validate_ids_exist(db, Event, [u["id"] for u in event_updates], "event")
+    if doc_updates or event_updates:
+        await _ensure_bulk_targets_all_or_division(db, doc_updates, event_updates)
+
+    if doc_updates:
+        await _batch_update_documents(db, doc_updates, user_id)
+    if event_updates:
         await _batch_update_events(db, event_updates, user_id)
 
 
