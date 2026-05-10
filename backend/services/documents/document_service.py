@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import String as SAString, func, literal, or_, select
+from sqlalchemy import String as SAString, case, cast, func, literal, nulls_last, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, load_only, selectinload
 
@@ -20,6 +20,7 @@ from models.documents.document import (
 )
 from models.documents.legislation import Legislation, SubLegislation
 from models.documents.document_file import DocumentFile, DocumentFileType
+from models.events.event import Event, EventStatus as EventRowStatus
 from models.events.user import User
 from utils.security import CurrentUser
 from schemas.documents.document import (
@@ -41,6 +42,8 @@ from utils.applicability import validate_applicability_refs
 
 logger = logging.getLogger(__name__)
 
+LINKED_OPTIONS_EVENTS_LABEL = "Events"
+LINKED_OPTIONS_MIN_SEARCH_LEN = 3
 
 SINGLE_ACTIVE_DOCUMENT_TYPES = {
     DocumentType.FAQ,
@@ -452,26 +455,202 @@ async def create_draft_from_document(db: AsyncSession, parent_id: int, user_id: 
 
 
 
-async def get_linked_options(
+def resolve_linked_type_tokens(tokens: list[str]) -> tuple[list[DocumentType], bool]:
+    """
+    Map UI labels to document enums and/or Events.
+
+    FAQ is omitted (not linkable). Unknown labels raise 400.
+    """
+    doc_types: list[DocumentType] = []
+    include_events = False
+    seen: set[DocumentType] = set()
+    for key in tokens:
+        lk = key.lower()
+        if lk in ("events", "event"):
+            include_events = True
+            continue
+        dt = LABEL_TO_DOCUMENT_TYPE.get(key)
+        if dt is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Unknown type {key!r}. Use a document label "
+                    f"(e.g. Policy, Guidance Note) and/or Events."
+                ),
+            )
+        if dt == DocumentType.FAQ:
+            continue
+        if dt not in seen:
+            seen.add(dt)
+            doc_types.append(dt)
+    return doc_types, include_events
+
+
+async def get_linked_options_paginated(
     db: AsyncSession,
-    document_type: DocumentType,
-    exclude_id: int | None = None,
-) -> list[dict]:
-    if document_type == DocumentType.FAQ:
-        return []
+    *,
+    doc_types: list[DocumentType],
+    include_events: bool,
+    search: str | None,
+    exclude_id: int | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[dict], int]:
+    """
+    Active documents (optional types) and/or active events, merged, sorted by name.
 
-    query = (
-        select(Document.id, Document.name)
-        .where(
-            Document.document_type == document_type,
+    ``search`` applies as ILIKE substring only when
+    ``len(search.strip()) >= LINKED_OPTIONS_MIN_SEARCH_LEN``.
+    """
+    raw_search = (search or "").strip()
+    apply_search = len(raw_search) >= LINKED_OPTIONS_MIN_SEARCH_LEN
+    pattern = f"%{raw_search}%" if apply_search else None
+
+    if not doc_types and not include_events:
+        return [], 0
+
+    offset = (page - 1) * page_size
+
+    if doc_types and not include_events:
+        conds = [
+            Document.document_type.in_(doc_types),
             Document.status == DocumentStatus.ACTIVE,
-        )
-    )
-    if exclude_id is not None:
-        query = query.where(Document.id != exclude_id)
+            Document.replaces_document_id.is_(None),
+        ]
+        if exclude_id is not None:
+            conds.append(Document.id != exclude_id)
+        if apply_search and pattern is not None:
+            conds.append(Document.name.ilike(pattern))
 
-    result = await db.execute(query.order_by(Document.name).limit(50))
-    return [{"id": row.id, "name": row.name} for row in result.all()]
+        total = (
+            await db.execute(select(func.count()).select_from(Document).where(*conds))
+        ).scalar_one()
+        rows = (
+            await db.execute(
+                select(Document.id, Document.name, Document.document_type)
+                .where(*conds)
+                .order_by(Document.name.asc())
+                .offset(offset)
+                .limit(page_size),
+            )
+        ).all()
+        out = [
+            {
+                "id": r.id,
+                "name": r.name,
+                "kind": "document",
+                "type_label": document_type_to_label(r.document_type.value),
+            }
+            for r in rows
+        ]
+        return out, int(total)
+
+    if include_events and not doc_types:
+        e_conds = [
+            Event.status == EventRowStatus.ACTIVE,
+            Event.replaces_document_id.is_(None),
+        ]
+        if apply_search and pattern is not None:
+            e_conds.append(
+                or_(
+                    Event.event_name.ilike(pattern),
+                    Event.sub_event_name.ilike(pattern),
+                ),
+            )
+        total = (
+            await db.execute(select(func.count()).select_from(Event).where(*e_conds))
+        ).scalar_one()
+        rows = (
+            await db.execute(
+                select(Event.id, Event.event_name, Event.sub_event_name)
+                .where(*e_conds)
+                .order_by(Event.event_name.asc(), nulls_last(Event.sub_event_name.asc()))
+                .offset(offset)
+                .limit(page_size),
+            )
+        ).all()
+        out = []
+        for r in rows:
+            if r.sub_event_name:
+                name = f"{r.event_name} — {r.sub_event_name}"
+            else:
+                name = r.event_name
+            out.append(
+                {
+                    "id": r.id,
+                    "name": name,
+                    "kind": "event",
+                    "type_label": LINKED_OPTIONS_EVENTS_LABEL,
+                },
+            )
+        return out, int(total)
+
+    doc_conds = [
+        Document.document_type.in_(doc_types),
+        Document.status == DocumentStatus.ACTIVE,
+        Document.replaces_document_id.is_(None),
+    ]
+    if exclude_id is not None:
+        doc_conds.append(Document.id != exclude_id)
+    if apply_search and pattern is not None:
+        doc_conds.append(Document.name.ilike(pattern))
+
+    event_display = case(
+        (
+            Event.sub_event_name.isnot(None),
+            func.concat(Event.event_name, literal(" — "), Event.sub_event_name),
+        ),
+        else_=Event.event_name,
+    )
+    e_conds = [
+        Event.status == EventRowStatus.ACTIVE,
+        Event.replaces_document_id.is_(None),
+    ]
+    if apply_search and pattern is not None:
+        e_conds.append(
+            or_(
+                Event.event_name.ilike(pattern),
+                Event.sub_event_name.ilike(pattern),
+            ),
+        )
+
+    doc_sel = (
+        select(
+            Document.id.label("id"),
+            Document.name.label("name"),
+            literal("document", type_=SAString).label("kind"),
+            cast(Document.document_type, SAString).label("dtype"),
+        ).where(*doc_conds)
+    )
+    event_sel = (
+        select(
+            Event.id.label("id"),
+            event_display.label("name"),
+            literal("event", type_=SAString).label("kind"),
+            literal(None, type_=SAString).label("dtype"),
+        ).where(*e_conds)
+    )
+    union_sub = union_all(doc_sel, event_sel).subquery("linked_opts")
+    total = (
+        await db.execute(select(func.count()).select_from(union_sub))
+    ).scalar_one()
+    union_rows = (
+        await db.execute(
+            select(union_sub)
+            .order_by(union_sub.c.name.asc())
+            .offset(offset)
+            .limit(page_size),
+        )
+    ).all()
+
+    out: list[dict] = []
+    for r in union_rows:
+        if r.kind == "document":
+            label = document_type_to_label(DocumentType(r.dtype))
+        else:
+            label = LINKED_OPTIONS_EVENTS_LABEL
+        out.append({"id": r.id, "name": r.name, "kind": r.kind, "type_label": label})
+    return out, int(total)
 
 
 async def get_linked_document_details(
