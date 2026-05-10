@@ -200,19 +200,63 @@ async def document_hub(
     )
 
 
-@router.get("/linked-options", response_model=APIResponse)
+def _linked_options_type_tokens(
+    types: list[str] | None,
+    document_type: str | None,
+) -> list[str]:
+    if types:
+        parsed = [t.strip() for t in types if t and str(t).strip()]
+        if parsed:
+            return parsed
+    if document_type is not None and document_type.strip():
+        return [document_type.strip()]
+    raise HTTPException(
+        status_code=400,
+        detail="Provide `types` (repeat query param, e.g. types=Policy&types=Events) or `document_type`.",
+    )
+
+
+@router.get("/linked-options", response_model=APIResponsePaginated)
 async def linked_options(
-    document_type: str = Query(..., description="Display label e.g. 'Policy'"),
-    exclude_id: int | None = Query(None),
+    types: list[str] | None = Query(
+        None,
+        description="Multiple values: `Policy`, `Guidance Note`, `Events`.",
+    ),
+    document_type: str | None = Query(
+        None,
+        description="Single display label e.g Policy, Guidance Note",
+    ),
+    search: str | None = Query(
+        None,
+        description="Substring match on name when length ≥ 3 (documents: name; events: title/sub-title).",
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    exclude_id: int | None = Query(None, description="Exclude this document id from document results"),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    doc_type_enum = LABEL_TO_DOCUMENT_TYPE.get((document_type or "").strip())
-    if doc_type_enum is None:
-        raise HTTPException(400, detail="Invalid document_type")
-    options = await document_service.get_linked_options(db, doc_type_enum, exclude_id)
-    data = [LinkedOptionOut(**o) for o in options]
-    return APIResponse(message="Linked options fetched", status_code=200, status="success", data=data)
+    tokens = _linked_options_type_tokens(types, document_type)
+    doc_types, include_events = document_service.resolve_linked_type_tokens(tokens)
+    rows, total = await document_service.get_linked_options_paginated(
+        db,
+        doc_types=doc_types,
+        include_events=include_events,
+        search=search,
+        exclude_id=exclude_id,
+        page=page,
+        page_size=page_size,
+    )
+    data = [LinkedOptionOut(**o) for o in rows]
+    return APIResponsePaginated(
+        message="Linked options fetched",
+        status_code=200,
+        status="success",
+        data=data,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/{document_id}", response_model=APIResponse)
