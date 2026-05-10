@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import bindparam, func, select, text, update
+from sqlalchemy import bindparam, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.dates import format_date_dmy_month_abbr
@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_UPLOAD_EXTENSIONS = frozenset({"xlsx", "csv", "xls"})
 
+# Row 1: A–D empty, then organization_vertical above each division column (not a data column).
+# Row 2: id, type, name, updated_at, then division_cluster headers.
 FIXED_COLUMNS = ["id", "type", "name", "updated_at"]
 
 # Safety cap so one upload cannot grow unbounded memory in parsed row list.
@@ -319,11 +321,13 @@ def _prepare_indices(
     header = [h.strip() for h in header_row]
     id_idx = _find_column(header, "id")
     type_idx = _find_column(header, "type")
+    updated_at_idx = _find_column(header, "updated_at")
     division_indices: list[tuple[int, str, str]] = []
     for i, h in enumerate(header):
-        if i > type_idx and h.lower() not in ("name", "updated_at", "id", "type"):
-            organization_vertical = reference_row[i].strip() if i < len(reference_row) else ""
-            division_indices.append((i, h, organization_vertical))
+        if i <= updated_at_idx:
+            continue
+        organization_vertical = reference_row[i].strip() if i < len(reference_row) else ""
+        division_indices.append((i, h, organization_vertical))
     if not division_indices:
         raise ValueError("No division columns found in the uploaded file")
     return id_idx, type_idx, division_indices
@@ -486,21 +490,17 @@ def _find_column(header: list[str], name: str) -> int:
 
 async def _get_division_columns(db: AsyncSession) -> list[tuple[str, str]]:
     """
-    Returns ordered (organization_vertical, division_cluster) pairs.
-    Row 1 uses organization_vertical (reference only), row 2 uses division_cluster headers.
+    Distinct (organization_vertical, division_cluster) from users.
+    Template row 1: org vertical only above division columns (cols after updated_at); row 2: headers.
     """
-
-
     result = await db.execute(
-        select(User.division_cluster)
+        select(User.organization_vertical, User.division_cluster)
         .where(User.division_cluster.isnot(None))
         .where(User.division_cluster != "")
         .distinct()
-        .order_by(User.division_cluster)
+        .order_by(User.organization_vertical, User.division_cluster)
     )
-    return [("", row[0]) for row in result.all()]
-
-
+    return [(row[0] or "", row[1]) for row in result.all()]
 
 
 def _document_row(r) -> dict:
@@ -619,14 +619,9 @@ def _write_reference_row(
     ws,
     division_columns: list[tuple[str, str]],
 ) -> None:
-    """
-    Row 1: user guidance + organization_vertical reference.
-    """
-    ws.cell(
-        row=1,
-        column=1,
-        value="User input rule: In division columns, enter only Y, N, or leave blank.",
-    )
+    """Row 1: fixed columns empty; each division column shows organization_vertical (reference)."""
+    for c in range(1, len(FIXED_COLUMNS) + 1):
+        ws.cell(row=1, column=c, value="")
     for col_idx, (organization_vertical, _division_cluster) in enumerate(
         division_columns, start=len(FIXED_COLUMNS) + 1
     ):
@@ -648,7 +643,7 @@ def _write_data_rows(
     rows: list[dict],
     division_columns: list[tuple[str, str]],
 ) -> None:
-    """Row 3+: fixed columns + division grid (Y only where DIVISION refs match column; ALL → blank)."""
+    """Row 3+: id, type, name, updated_at; then division Y/N grid."""
     for row_idx, row_data in enumerate(rows, start=3):
         ws.cell(row=row_idx, column=1, value=row_data["id"])
         ws.cell(row=row_idx, column=2, value=row_data["type"])
@@ -682,16 +677,14 @@ def _apply_styles(
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     total_cols = len(FIXED_COLUMNS) + len(division_columns)
 
-    # Row 1 is reference-only; highlight differently.
+    # Row 1: organization_vertical reference above divisions.
     reference_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
     for col_idx in range(1, total_cols + 1):
         ref_cell = ws.cell(row=1, column=col_idx)
-        if col_idx <= len(FIXED_COLUMNS):
-            ref_cell.font = Font(bold=True, size=10)
-            ref_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        else:
-            ref_cell.font = Font(bold=True, size=10)
-            ref_cell.alignment = header_alignment
+        ref_cell.font = Font(bold=True, size=10)
+        ref_cell.alignment = (
+            header_alignment if col_idx > len(FIXED_COLUMNS) else Alignment(horizontal="left", vertical="center")
+        )
         ref_cell.fill = reference_fill
 
     for col_idx in range(1, total_cols + 1):
