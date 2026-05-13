@@ -195,35 +195,37 @@ async def list_history(
     return items, total
 
 
-
-
-async def process_pending_requests(db: AsyncSession, user_id: str | None = None) -> dict:
+async def process_request_by_id(
+    db: AsyncSession,
+    request_id: int,
+    user_id: str | None = None,
+) -> dict:
     """
-    Pick all PENDING requests ordered by created_at and process each.
-    Returns summary of processed/failed counts.
+    Process a single PENDING bulk applicability row (e.g. right after upload).
+    Returns final status and optional error_message from the row.
     """
-    pending_q = (
-        select(BulkApplicabilityRequest)
-        .where(BulkApplicabilityRequest.status == BulkApplicabilityStatus.PENDING)
-        .order_by(BulkApplicabilityRequest.created_at.asc())
+    result = await db.execute(
+        select(BulkApplicabilityRequest).where(BulkApplicabilityRequest.id == request_id)
     )
-    result = await db.execute(pending_q)
-    requests = list(result.scalars().all())
-
-    processed = 0
-    failed = 0
-
-    for req in requests:
-        req_id = req.id
-        try:
-            await _process_single_request(db, req, user_id)
-            processed += 1
-        except Exception:
-            failed += 1
-            await db.rollback()
-            logger.exception("Failed to process bulk applicability request %s", req_id)
-
-    return {"processed": processed, "failed": failed, "total": len(requests)}
+    req = result.scalar_one_or_none()
+    if req is None:
+        raise ValueError(f"Bulk applicability request {request_id} not found")
+    if req.status != BulkApplicabilityStatus.PENDING:
+        return {
+            "request_id": request_id,
+            "status": req.status.value,
+            "error_message": req.error_message,
+            "message": "Request was not pending; skipped processing.",
+        }
+    await _process_single_request(db, req, user_id)
+    row = await get_history_by_id(db, request_id)
+    if row is None:
+        raise ValueError(f"Bulk applicability request {request_id} not found after processing")
+    return {
+        "request_id": request_id,
+        "status": row.status.value,
+        "error_message": row.error_message,
+    }
 
 
 async def _persist_request_failed(

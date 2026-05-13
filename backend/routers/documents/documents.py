@@ -200,31 +200,28 @@ async def document_hub(
     )
 
 
-def _linked_options_type_tokens(
-    types: list[str] | None,
-    document_type: str | None,
-) -> list[str]:
-    if types:
-        parsed = [t.strip() for t in types if t and str(t).strip()]
+def _linked_options_type_tokens(types: str | None, document_type: str | None) -> list[str]:
+    if types is not None and types.strip():
+        parsed = [p.strip() for p in types.split(",") if p.strip()]
         if parsed:
             return parsed
     if document_type is not None and document_type.strip():
         return [document_type.strip()]
     raise HTTPException(
         status_code=400,
-        detail="Provide `types` (repeat query param, e.g. types=Policy&types=Events) or `document_type`.",
+        detail="Provide `types` (comma-separated labels) or `document_type` (single label).",
     )
 
 
 @router.get("/linked-options", response_model=APIResponsePaginated)
 async def linked_options(
-    types: list[str] | None = Query(
+    types: str | None = Query(
         None,
-        description="Multiple values: `Policy`, `Guidance Note`, `Events`.",
+        description="Comma-separated: Policy, Guidance Note, Events, … (Events = active events).",
     ),
     document_type: str | None = Query(
         None,
-        description="Single display label e.g Policy, Guidance Note",
+        description="Single display label (legacy); used when `types` is omitted or empty.",
     ),
     search: str | None = Query(
         None,

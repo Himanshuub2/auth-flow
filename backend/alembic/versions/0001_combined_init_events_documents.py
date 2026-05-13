@@ -3,6 +3,9 @@
 Single migration for fresh installs. Includes: schemas, tables,
 enums (event_status/document_status: DRAFT, ACTIVE, INACTIVE), and seed data.
 
+Schema matches post–bb46983d6af6 + 0004_version_revision_numeric_media + event_revisions
+applicability (applicability_type enum, applicability_refs text[] nullable).
+
 Revision ID: 0001_combined
 Revises: None
 Create Date: 2026-03-07
@@ -118,13 +121,22 @@ def upgrade() -> None:
         "event_revisions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("event_id", sa.Integer(), nullable=False),
-        sa.Column("media_version", sa.Integer(), nullable=False),
+        sa.Column("media_version", sa.Numeric(10, 2), nullable=False),
         sa.Column("revision_number", sa.Integer(), nullable=False),
         sa.Column("event_name", sa.String(length=255), nullable=False),
         sa.Column("sub_event_name", sa.String(length=255), nullable=True),
         sa.Column("event_dates", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("tags", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "applicability_type",
+            postgresql.ENUM(
+                "ALL", "DIVISION", "EMPLOYEE",
+                name="applicability_type", schema=EVENTS, create_type=False,
+            ),
+            nullable=False,
+        ),
+        sa.Column("applicability_refs", postgresql.ARRAY(sa.Text()), nullable=True),
         sa.Column("file_ids", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="[]"),
         sa.Column("created_by", sa.String(255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
@@ -312,7 +324,7 @@ def upgrade() -> None:
         "document_revisions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("document_id", sa.Integer(), nullable=False),
-        sa.Column("media_version", sa.Integer(), nullable=False),
+        sa.Column("media_version", sa.Numeric(10, 2), nullable=False),
         sa.Column("revision_number", sa.Integer(), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column(

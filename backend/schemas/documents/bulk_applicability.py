@@ -72,8 +72,3 @@ class BulkApplicabilityHistoryItem(BaseModel):
     organization_vertical: str = "Organization (Vertical)"
 
     model_config = {"from_attributes": True}
-
-
-class BulkApplicabilityUploadOut(BaseModel):
-    request_id: int
-    message: str

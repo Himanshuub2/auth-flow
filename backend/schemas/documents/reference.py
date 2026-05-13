@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -24,6 +26,8 @@ class SubLegislationOut(BaseModel):
 class LinkedOptionOut(BaseModel):
     id: int
     name: str
+    kind: Literal["document", "event"]
+    type_label: str
 
 
 class DivisionOut(BaseModel):

@@ -44,6 +44,7 @@ async def save_event(
         allow_division=False,
     )
     is_new = event_id is None
+    parent_to_draft_id: dict[int, int] = {}
 
     if is_new:
         event = Event(created_by=user_id)
@@ -54,7 +55,7 @@ async def save_event(
         event.updated_by = user_id
 
         if event.status == EventStatus.ACTIVE and payload.status == EventStatus.DRAFT:
-            event = await _get_or_create_draft(db, event, user_id)
+            event, parent_to_draft_id = await _get_or_create_draft(db, event, user_id)
         elif event.status == EventStatus.ACTIVE and payload.status == EventStatus.ACTIVE:
             if not payload.change_remarks or not payload.change_remarks.strip():
                 raise HTTPException(
@@ -76,7 +77,7 @@ async def save_event(
     event.version = payload.version
 
     if payload.file_metadata is not None:
-        await _sync_media_from_metadata(db, event, payload.file_metadata)
+        await _sync_media_from_metadata(db, event, payload.file_metadata, parent_to_draft_id=parent_to_draft_id)
 
     if payload.status == EventStatus.ACTIVE:
         await _validate_active_event_name_uniqueness(
@@ -368,12 +369,21 @@ async def create_draft_from_event(db: AsyncSession, parent_event_id: int, user_i
     parent = await get_event(db, parent_event_id)
     if parent.status != EventStatus.ACTIVE:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Can only create drafts from active events")
-    draft = await _get_or_create_draft(db, parent, user_id)
+    draft, _ = await _get_or_create_draft(db, parent, user_id)
     await db.refresh(draft)
     return draft
 
 
-async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: str) -> Event:
+async def _get_or_create_draft(
+    db: AsyncSession, parent: Event, user_id: str
+) -> tuple[Event, dict[int, int]]:
+    """
+    Return (draft, parent_to_draft_id_map).
+
+    parent_to_draft_id_map maps each parent file ID → the corresponding
+    draft copy ID.  Empty dict when returning an already-existing draft
+    (the FE will resolve IDs via the normal sync path in that case).
+    """
     existing = (await db.execute(
         select(Event).where(
             Event.replaces_document_id == parent.id,
@@ -381,7 +391,7 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: str) ->
         )
     )).scalar_one_or_none()
     if existing:
-        return existing
+        return existing, {}
 
     parent_file_ids = await _get_current_file_ids(db, parent)
 
@@ -405,6 +415,7 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: str) ->
     await db.flush()
 
     new_staging_ids: list[int] = []
+    parent_to_draft_id: dict[int, int] = {}
     for fid in parent_file_ids:
         pf = parent_file_by_id.get(fid)
         if not pf:
@@ -423,10 +434,11 @@ async def _get_or_create_draft(db: AsyncSession, parent: Event, user_id: str) ->
         db.add(new_file)
         await db.flush()
         new_staging_ids.append(new_file.id)
+        parent_to_draft_id[fid] = new_file.id
 
     draft.staging_file_ids = new_staging_ids
     await db.flush()
-    return draft
+    return draft, parent_to_draft_id
 
 
 # -- publish ---------------------------------------------------------------

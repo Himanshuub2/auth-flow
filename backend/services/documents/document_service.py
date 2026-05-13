@@ -3,7 +3,18 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import String as SAString, case, cast, func, literal, nulls_last, or_, select, union_all
+from sqlalchemy import (
+    String as SAString,
+    case,
+    cast,
+    func,
+    literal,
+    literal_column,
+    nulls_last,
+    or_,
+    select,
+    union_all,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, load_only, selectinload
 
@@ -675,6 +686,24 @@ HUB_NEW_DAYS = 2  # Documents created in the last N days are shown as "new"
 HUB_MAX_PAGE_SIZE = 100
 
 
+def _org_vertical_division_clusters_array(organization_vertical: str):
+    """Distinct division_cluster for one org vertical (users table), as a single text[]."""
+    return (
+        select(
+            func.coalesce(
+                func.array_agg(func.distinct(User.division_cluster)),
+                literal_column("'{}'::text[]"),
+            )
+        )
+        .select_from(User)
+        .where(
+            User.organization_vertical == organization_vertical,
+            User.division_cluster.isnot(None),
+            User.division_cluster != "",
+        )
+    ).scalar_subquery()
+
+
 def _apply_applicability_filter(query, user: CurrentUser, applicability: str | None):
     """Filter hub queries by applicability.
 
@@ -687,7 +716,7 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
       None / "ALL"  -> records visible to me: ALL-type, OR DIVISION matching my division,
                        OR EMPLOYEE matching my email.
       "DIVISION"    -> only DIVISION-type records where my division is in refs.
-      "EMPLOYEE"    -> only EMPLOYEE-type records where my email is in refs.
+      "EMPLOYEE"    -> DIVISION-type records whose refs overlap divisions for my organization_vertical.
     """
     kind = (applicability or "").strip().upper() or None
 
@@ -700,11 +729,13 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
         )
 
     if kind == "EMPLOYEE":
-        if not user.email:
+        org_vertical = (user.organization_vertical or "").strip()
+        if not org_vertical:
             return query.where(literal(False))
+        clusters = _org_vertical_division_clusters_array(org_vertical)
         return query.where(
-            (Document.applicability_type == ApplicabilityType.EMPLOYEE)
-            & Document.applicability_refs.contains([user.email])
+            (Document.applicability_type == ApplicabilityType.DIVISION)
+            & Document.applicability_refs.overlap(clusters)
         )
 
     # Default / "ALL": records visible to me.

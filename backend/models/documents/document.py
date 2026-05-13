@@ -3,7 +3,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import BaseDocuments
@@ -139,7 +139,7 @@ class Document(BaseDocuments):
         Enum(ApplicabilityType, name="doc_applicability_type", schema=SCHEMA, create_constraint=True),
         default=ApplicabilityType.ALL,
     )
-    applicability_refs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    applicability_refs: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
 
     status: Mapped[DocumentStatus] = mapped_column(
         Enum(DocumentStatus, name="document_status", schema=SCHEMA, create_constraint=True),
@@ -212,7 +212,7 @@ class DocumentRevision(BaseDocuments):
         Enum(ApplicabilityType, name="doc_applicability_type", schema=SCHEMA, create_constraint=True),
         default=ApplicabilityType.ALL,
     )
-    applicability_refs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    applicability_refs: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
 
     file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 

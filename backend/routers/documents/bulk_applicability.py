@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 import os
 import uuid
@@ -6,11 +8,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from database import async_session_factory, get_db
 from models.documents.document import DocumentType
 from schemas.documents.bulk_applicability import (
     BulkApplicabilityHistoryItem,
-    BulkApplicabilityUploadOut,
     DownloadTemplateRequest,
 )
 from schemas.events.comman import APIResponse, APIResponsePaginated
@@ -24,6 +25,11 @@ router = APIRouter()
 
 ALLOWED_EXTENSIONS = frozenset({"xlsx", "csv", "xls"})
 BLOB_PREFIX = "bulk-applicability"
+SSE_HEARTBEAT_SEC = 20.0
+
+
+def _sse_chunk(event: dict) -> bytes:
+    return f"data: {json.dumps(event)}\n\n".encode("utf-8")
 
 _CONTENT_TYPE_BY_EXT = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -56,7 +62,7 @@ async def download_template(
     )
 
 
-@router.post("/upload", response_model=APIResponse, status_code=202)
+@router.post("/upload")
 async def upload_bulk_file(
     file: UploadFile = File(...),
     selected_types: str | None = Form(
@@ -64,7 +70,6 @@ async def upload_bulk_file(
         description="Optional comma-separated types, e.g. POLICY,EWS,EVENTS. If omitted, all types are processed.",
     ),
     change_remarks: str | None = Form(None),
-    force_start: bool = Form(False, description="If true, process immediately instead of queuing for cron"),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
 ):
@@ -102,26 +107,45 @@ async def upload_bulk_file(
         change_remarks=change_remarks,
         user_id=user.id,
     )
-    # Persist the PENDING row before processing so a processing rollback cannot
-    # remove this insert when force_start runs in the same request.
+    # Persist the PENDING row before streaming processing so rollback in the worker
+    # session cannot undo this insert.
     await db.commit()
 
-    if force_start:
-        try:
-            await svc.process_pending_requests(db, user_id=user.id)
-        except Exception:
-            logger.exception("Force-start processing failed for request %s", req.id)
+    request_id = req.id
+    actor_id = user.id
 
-    return APIResponse(
-        message="File uploaded successfully. Processing queued."
-        if not force_start
-        else "File uploaded and processing started.",
-        status_code=202,
-        status="success",
-        data=BulkApplicabilityUploadOut(
-            request_id=req.id,
-            message="Processing queued" if not force_start else "Processing started",
-        ).model_dump(),
+    async def event_stream():
+        yield _sse_chunk({"type": "started", "request_id": request_id})
+
+        async def process_one():
+            async with async_session_factory() as session:
+                try:
+                    return await svc.process_request_by_id(session, request_id, user_id=actor_id)
+                except Exception as exc:
+                    logger.exception("Bulk applicability stream processing failed for request %s", request_id)
+                    return {"request_id": request_id, "status": "error", "error_message": str(exc)}
+
+        task = asyncio.create_task(process_one())
+        try:
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=SSE_HEARTBEAT_SEC)
+                if task in done:
+                    break
+                yield _sse_chunk({"type": "keepalive"})
+            result = await task
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        yield _sse_chunk({"type": "complete", **result})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -187,22 +211,4 @@ async def get_history(
         total=total,
         page=page,
         page_size=page_size,
-    )
-
-
-@router.post("/process-pending", response_model=APIResponse)
-async def process_pending(
-    db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
-):
-    """
-    Internal endpoint for cron / Azure Function to trigger processing.
-    Can also be called manually by admins.
-    """
-    summary = await svc.process_pending_requests(db, user_id=user.id)
-    return APIResponse(
-        message="Processing complete",
-        status_code=200,
-        status="success",
-        data=summary,
     )

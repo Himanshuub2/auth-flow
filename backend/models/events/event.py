@@ -4,7 +4,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import BaseEvents
@@ -50,7 +50,7 @@ class Event(BaseEvents):
         Enum(ApplicabilityType, name="applicability_type", schema=SCHEMA, create_constraint=True),
         default=ApplicabilityType.ALL,
     )
-    applicability_refs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    applicability_refs: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
 
     replaces_document_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(f"{SCHEMA}.events.id", ondelete="SET NULL"), nullable=True
@@ -109,6 +109,13 @@ class EventRevision(BaseEvents):
     event_dates: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    applicability_type: Mapped[ApplicabilityType] = mapped_column(
+        Enum(ApplicabilityType, name="applicability_type", schema=SCHEMA, create_constraint=True),
+        nullable=False,
+        default=ApplicabilityType.ALL,
+    )
+    applicability_refs: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
 
     file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 

@@ -25,7 +25,7 @@ class DocumentSavePayload(BaseModel):
     download_allowed: bool = True
     linked_document_ids: list[int] | None = None
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
-    applicability_refs: dict | list | None = None
+    applicability_refs: list[str] | None = None
     status: DocumentStatus = DocumentStatus.DRAFT
     selected_file_ids: list[int] | None = None
     change_remarks: str | None = None
@@ -108,7 +108,7 @@ class DocumentOut(BaseModel):
     next_review_date: date | None
     download_allowed: bool
     applicability_type: ApplicabilityType
-    applicability_refs: dict | list | None
+    applicability_refs: list[str] | None
     status: DocumentStatus
     version: Decimal
     revision: int
@@ -142,7 +142,7 @@ class DocumentRevisionOut(BaseModel):
     tags: list | None
     summary: str | None
     applicability_type: ApplicabilityType
-    applicability_refs: dict | list | None
+    applicability_refs: list[str] | None
     change_remarks: str | None = None
     deactivate_remarks: str | None = None
     status: str
