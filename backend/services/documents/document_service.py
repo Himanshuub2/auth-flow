@@ -15,6 +15,7 @@ from sqlalchemy import (
     select,
     union_all,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, load_only, selectinload
 
@@ -685,14 +686,21 @@ async def get_linked_document_details(
 HUB_NEW_DAYS = 2  # Documents created in the last N days are shown as "new"
 HUB_MAX_PAGE_SIZE = 100
 
+# Hub array ops: model uses varchar(255)[] binds; DB may still be text[] until migration 0008.
+_APPLICABILITY_REFS_ARRAY = ARRAY(SAString(255))
+
+
+def _document_applicability_refs():
+    return cast(Document.applicability_refs, _APPLICABILITY_REFS_ARRAY)
+
 
 def _org_vertical_division_clusters_array(organization_vertical: str):
-    """Distinct division_cluster for one org vertical (users table), as a single text[]."""
-    return (
+    """Distinct division_cluster for one org vertical (users table), as varchar(255)[]."""
+    clusters = (
         select(
             func.coalesce(
                 func.array_agg(func.distinct(User.division_cluster)),
-                literal_column("'{}'::text[]"),
+                literal_column("'{}'::varchar(255)[]"),
             )
         )
         .select_from(User)
@@ -702,6 +710,7 @@ def _org_vertical_division_clusters_array(organization_vertical: str):
             User.division_cluster != "",
         )
     ).scalar_subquery()
+    return cast(clusters, _APPLICABILITY_REFS_ARRAY)
 
 
 def _apply_applicability_filter(query, user: CurrentUser, applicability: str | None):
@@ -723,9 +732,10 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
     if kind == "DIVISION":
         if not user.division_cluster:
             return query.where(literal(False))
+        refs = _document_applicability_refs()
         return query.where(
             (Document.applicability_type == ApplicabilityType.DIVISION)
-            & Document.applicability_refs.contains([user.division_cluster])
+            & refs.contains([user.division_cluster])
         )
 
     if kind == "EMPLOYEE":
@@ -733,22 +743,24 @@ def _apply_applicability_filter(query, user: CurrentUser, applicability: str | N
         if not org_vertical:
             return query.where(literal(False))
         clusters = _org_vertical_division_clusters_array(org_vertical)
+        refs = _document_applicability_refs()
         return query.where(
             (Document.applicability_type == ApplicabilityType.DIVISION)
-            & Document.applicability_refs.overlap(clusters)
+            & refs.overlap(clusters)
         )
 
     # Default / "ALL": records visible to me.
+    refs = _document_applicability_refs()
     conditions = [Document.applicability_type == ApplicabilityType.ALL]
     if user.division_cluster:
         conditions.append(
             (Document.applicability_type == ApplicabilityType.DIVISION)
-            & Document.applicability_refs.contains([user.division_cluster])
+            & refs.contains([user.division_cluster])
         )
     if user.email:
         conditions.append(
             (Document.applicability_type == ApplicabilityType.EMPLOYEE)
-            & Document.applicability_refs.contains([user.email])
+            & refs.contains([user.email])
         )
     return query.where(or_(*conditions))
 
@@ -818,28 +830,69 @@ def _hub_ranked_subquery(
     return inner.subquery("hub_ranked")
 
 
-async def _hub_counts_by_type(
+async def _hub_totals_and_new_counts(
     db: AsyncSession,
     type_enums: list[DocumentType],
     user: CurrentUser,
     applicability: str | None,
     search: str | None,
     *,
-    created_after: datetime | None = None,
-) -> dict[DocumentType, int]:
-    """Single grouped COUNT per document_type (no subquery wrapper)."""
-    stmt = select(Document.document_type, func.count().label("cnt")).where(
-        Document.status == DocumentStatus.ACTIVE,
-        Document.replaces_document_id.is_(None),
-        Document.document_type.in_(type_enums),
+    cutoff: datetime,
+) -> tuple[dict[DocumentType, int], dict[DocumentType, int]]:
+    """Grouped totals and per-type counts of documents new since cutoff (single round-trip)."""
+    is_new = Document.created_at >= cutoff
+    stmt = (
+        select(
+            Document.document_type,
+            func.count().label("total"),
+            func.coalesce(
+                func.sum(case((is_new, 1), else_=0)),
+                0,
+            ).label("new_cnt"),
+        )
+        .where(
+            Document.status == DocumentStatus.ACTIVE,
+            Document.replaces_document_id.is_(None),
+            Document.document_type.in_(type_enums),
+        )
     )
-    if created_after is not None:
-        stmt = stmt.where(Document.created_at >= created_after)
     stmt = _apply_applicability_filter(stmt, user, applicability)
     stmt = _apply_search_filter(stmt, search)
     stmt = stmt.group_by(Document.document_type)
     rows = (await db.execute(stmt)).all()
-    return {row[0]: int(row[1]) for row in rows}
+    totals = {row[0]: int(row[1]) for row in rows}
+    new_counts = {row[0]: int(row[2]) for row in rows}
+    return totals, new_counts
+
+
+async def _first_file_url_per_document(
+    db: AsyncSession,
+    document_ids: list[int],
+) -> dict[int, str]:
+    """One row per document_id (PostgreSQL DISTINCT ON → index-friendly ORDER BY).
+
+    Mirrors the previous Python first-row pick when ordering document_id, sort_order, id.
+    """
+    if not document_ids:
+        return {}
+    flyer_stmt = (
+        select(DocumentFile.document_id, DocumentFile.file_url)
+        .where(DocumentFile.document_id.in_(document_ids))
+        .distinct(DocumentFile.document_id)
+        .order_by(
+            DocumentFile.document_id.asc(),
+            DocumentFile.sort_order.asc(),
+            DocumentFile.id.asc(),
+        )
+    )
+    resolved = await db.execute(flyer_stmt)
+    return {row.document_id: row.file_url for row in resolved.all()}
+
+
+def _hub_show_categories_without_items(
+    doc_types_arg: list[str] | None, load_more_type_arg: str | None
+) -> bool:
+    return (doc_types_arg is not None and bool(doc_types_arg)) or (load_more_type_arg is not None)
 
 
 async def get_document_hub(
@@ -871,13 +924,12 @@ async def get_document_hub(
         )
 
     if applicability is not None:
-        applicability = applicability.strip()
-        if not applicability:
-            applicability = None
+        applicability = applicability.strip() or None
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=HUB_NEW_DAYS)
+    mode_load_more = load_more_type is not None and load_more_page is not None
 
-    if load_more_type is not None and load_more_page is not None:
+    if mode_load_more:
         load_more_stripped = load_more_type.strip()
         if not load_more_stripped:
             raise HTTPException(
@@ -896,78 +948,67 @@ async def get_document_hub(
                 detail=f"Invalid document type for load more: {load_more_type}",
             )
         type_enums = [doc_type_enum]
-        is_load_more = True
     else:
         type_enums = _resolve_doc_types(doc_types)
-        is_load_more = False
 
     if not type_enums:
         return DocumentHubOut(categories=[])
 
-    # Two grouped COUNT queries for all types (instead of 2N subquery counts).
-    totals = await _hub_counts_by_type(db, type_enums, user, applicability, search)
-    new_counts = await _hub_counts_by_type(
-        db, type_enums, user, applicability, search, created_after=cutoff
+    totals, new_counts = await _hub_totals_and_new_counts(
+        db, type_enums, user, applicability, search, cutoff=cutoff
     )
 
-    # One ranked query for hub rows (window over document_type).
     ranked = _hub_ranked_subquery(type_enums, user, applicability, search)
-    if is_load_more:
-        assert load_more_page is not None
-        doc_type_enum = type_enums[0]
-        lo = load_more_page
-        hi = lo * page_size
-        lo_rn = (lo - 1) * page_size
-        page_stmt = select(
-            ranked.c.id,
-            ranked.c.name,
-            ranked.c.created_at,
-            ranked.c.document_type,
-        ).where(
-            ranked.c.document_type == doc_type_enum,
-            ranked.c.rn > lo_rn,
-            ranked.c.rn <= hi,
-        )
+    if mode_load_more:
+        assert load_more_page is not None  # guarded by mode_load_more
+        rn_hi = load_more_page * page_size
+        rn_lo_exclusive = rn_hi - page_size
     else:
-        page_stmt = select(
+        rn_hi = page_size
+        rn_lo_exclusive = 0
+    page_stmt = (
+        select(
             ranked.c.id,
             ranked.c.name,
             ranked.c.created_at,
             ranked.c.document_type,
-        ).where(ranked.c.rn <= page_size)
+        )
+        .where(
+            ranked.c.rn <= rn_hi,
+            ranked.c.rn > rn_lo_exclusive,
+        )
+    )
+    if mode_load_more:
+        page_stmt = page_stmt.where(ranked.c.document_type == type_enums[0])
 
     page_rows = (await db.execute(page_stmt)).all()
 
     flyer_doc_ids = [r.id for r in page_rows if r.document_type == DocumentType.FLYER]
-    flyer_file_urls: dict[int, str] = {}
-    if flyer_doc_ids:
-        flyer_files = (await db.execute(
-            select(DocumentFile.document_id, DocumentFile.file_url)
-            .where(DocumentFile.document_id.in_(flyer_doc_ids))
-            .order_by(DocumentFile.document_id.asc(), DocumentFile.sort_order.asc(), DocumentFile.id.asc())
-        )).all()
-        for row in flyer_files:
-            if row.document_id not in flyer_file_urls:
-                flyer_file_urls[row.document_id] = row.file_url
+    flyer_file_urls = await _first_file_url_per_document(db, flyer_doc_ids)
 
     items_by_type: dict[DocumentType, list[DocumentHubItem]] = defaultdict(list)
     for r in page_rows:
-        dt = r.document_type
-        items_by_type[dt].append(
+        dt_row = r.document_type
+        items_by_type[dt_row].append(
             DocumentHubItem(
                 id=r.id,
                 name=r.name,
                 isNew=r.created_at >= cutoff if r.created_at else False,
-                file_url=flyer_file_urls.get(r.id) if dt == DocumentType.FLYER else None,
+                file_url=(
+                    flyer_file_urls.get(r.id) if dt_row == DocumentType.FLYER else None
+                ),
             )
         )
 
+    show_empty_categories = _hub_show_categories_without_items(doc_types, load_more_type)
+
     categories: list[DocumentHubCategory] = []
     for dt in type_enums:
+        items = items_by_type.get(dt, [])
         total = totals.get(dt, 0)
         new_count = new_counts.get(dt, 0)
-        items = items_by_type.get(dt, [])
-        if items or (doc_types is not None and doc_types) or (load_more_type is not None):
+
+        if items or show_empty_categories:
             categories.append(
                 DocumentHubCategory(
                     document_type=DOCUMENT_TYPE_LABELS.get(dt, dt.value),

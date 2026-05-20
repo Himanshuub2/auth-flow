@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     KV_URL: str = ""              # https://<vault-name>.vault.azure.net
 
     # ── DB params (filled from Key Vault at startup) ───────────────────
-    DATABASE_URL: str = ""
+    DATABASE_URL: str = "postgresql+asyncpg://eventflow:eventflow_secret@localhost:5432/eventflow"
     DB_HOST: str = ""
     DB_PORT: int = 5432
     DB_USER: str = ""
@@ -89,6 +89,7 @@ class Settings(BaseSettings):
                 host=self.DB_HOST,
                 port=self.DB_PORT,
                 database=db_name,
+                query={"sslmode": "require"},
             )
         )
 

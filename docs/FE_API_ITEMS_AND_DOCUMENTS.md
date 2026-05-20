@@ -275,7 +275,7 @@ Same response shape as **Get item detail** with `item_type=document` (see above)
   "summary": "some summary",
   "legislation_id": null,
   "sub_legislation_id": null,
-  "version": 1,`
+  "version": 1.0,`
   "next_review_date": null,
   "download_allowed": true,
   "linked_document_ids": [],
