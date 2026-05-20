@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from services.documents import document_service
 from utils import cache_keys
+from utils.cache_keys import faq_data as faq_cache_key
 from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user, is_active_master_or_policy_or_kh_admin
 
@@ -93,6 +94,8 @@ async def create_document(
     await cache_delete_prefix("doc:whats_new:")
     await cache_delete_prefix("doc:home_by_type:")
     await cache_delete("items:kpi")
+    if doc.document_type == DocumentType.FAQ:
+        await cache_delete(faq_cache_key())
     return APIResponse(message="Document created", status_code=201, status="success", data=_minimal_document_data(doc))
 
 
@@ -114,6 +117,8 @@ async def update_document(
     await cache_delete_prefix("doc:whats_new:")
     await cache_delete_prefix("doc:home_by_type:")
     await cache_delete("items:kpi")
+    if doc.document_type == DocumentType.FAQ:
+        await cache_delete(faq_cache_key())
     return APIResponse(message="Document updated", status_code=200, status="success", data=_minimal_document_data(doc))
 
 
@@ -285,6 +290,8 @@ async def toggle_status(
     await cache_delete_prefix("doc:whats_new:")
     await cache_delete_prefix("doc:home_by_type:")
     await cache_delete("items:kpi")
+    if doc.document_type == DocumentType.FAQ:
+        await cache_delete(faq_cache_key())
     return APIResponse(message="Status updated", status_code=200, status="success", data=_minimal_document_data(doc))
 
 

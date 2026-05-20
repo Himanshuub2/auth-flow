@@ -46,6 +46,10 @@ def item_detail(item_type: str, item_id: int) -> str:
     return f"item:{item_type}:{item_id}"
 
 
+def faq_data() -> str:
+    return "faq:data"
+
+
 def items_list(
     page: int,
     page_size: int,

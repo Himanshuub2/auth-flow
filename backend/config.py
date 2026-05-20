@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # ── Azure Blob Storage ────────────────────────────────────────────────
     AZURE_STORAGE_CONNECTION_STRING: str = ""
     AZURE_CONTAINER_NAME: str = "uploads"
-    BYPASS_AZURE_UPLOAD: bool = True
+    BYPASS_AZURE_UPLOAD: bool = False
 
     class Config:
         env_file = ".env"
