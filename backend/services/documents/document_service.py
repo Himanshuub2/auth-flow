@@ -336,43 +336,22 @@ async def list_documents(
     return docs, total
 
 
-async def _latest_revision_file_ids_by_document(
-    db: AsyncSession,
-    document_ids: list[int],
-) -> dict[int, list[int]]:
-    """Latest revision ``file_ids`` per document (PostgreSQL DISTINCT ON document_id)."""
-    if not document_ids:
-        return {}
-    rows = await db.execute(
-        select(DocumentRevision.document_id, DocumentRevision.file_ids)
-        .where(DocumentRevision.document_id.in_(document_ids))
-        .distinct(DocumentRevision.document_id)
-        .order_by(
-            DocumentRevision.document_id,
-            DocumentRevision.revision_number.desc(),
-            DocumentRevision.media_version.desc(),
-        )
-    )
-    return {doc_id: list(file_ids or []) for doc_id, file_ids in rows.all()}
-
-
 async def list_active_documents_for_home(
     db: AsyncSession,
     document_type: DocumentType,
     page: int,
     page_size: int,
-) -> tuple[list[Document], int, dict[int, list[int]]]:
-    """Active docs of one type; latest revision file_ids loaded via revision table."""
+) -> tuple[list[tuple[Document, list[int]]], int]:
+    """Active docs of one type; file_ids from document_revisions for doc.revision."""
     filters = (
         Document.document_type == document_type,
         Document.status == DocumentStatus.ACTIVE,
     )
-    count_query = select(func.count()).select_from(Document).where(*filters)
-    total = (await db.execute(count_query)).scalar() or 0
     _home_doc_cols = (
         Document.id,
         Document.name,
         Document.document_type,
+        Document.revision,
         Document.updated_at,
     )
     _home_file_cols = (
@@ -384,7 +363,12 @@ async def list_active_documents_for_home(
         DocumentFile.sort_order,
     )
     query = (
-        select(Document)
+        select(Document, DocumentRevision.file_ids)
+        .join(
+            DocumentRevision,
+            (DocumentRevision.document_id == Document.id)
+            & (DocumentRevision.revision_number == Document.revision),
+        )
         .where(*filters)
         .options(
             load_only(*_home_doc_cols),
@@ -394,28 +378,16 @@ async def list_active_documents_for_home(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    docs = list((await db.execute(query)).scalars().all())
-    file_ids_by_doc = await _latest_revision_file_ids_by_document(db, [d.id for d in docs])
-    return docs, total, file_ids_by_doc
+    rows = (await db.execute(query)).all()
+    return [(row[0], list(row[1] or [])) for row in rows], 0
 
 
-def home_by_type_preview(
-    doc: Document,
-    *,
-    revision_file_ids: list[int] | None = None,
-) -> dict:
-    """Minimal home/gallery payload: id, name, document_type, files with SAS URLs.
-
-    Only includes files listed on the document's latest revision (``file_ids``).
-    """
+def home_by_type_preview(doc: Document, revision_file_ids: list[int]) -> dict:
+    """Home gallery: files from latest revision only (IMAGE), with SAS URLs."""
     storage = get_storage()
-    target_file_ids = set(
-        revision_file_ids
-        if revision_file_ids is not None
-        else _get_current_file_ids_sync(doc)
-    )
+    file_id_set = set(revision_file_ids)
     files_sorted = sorted(
-        (f for f in (doc.files or []) if f.id in target_file_ids),
+        (f for f in (doc.files or []) if f.id in file_id_set),
         key=lambda f: f.sort_order,
     )
     files_out: list[dict] = []
