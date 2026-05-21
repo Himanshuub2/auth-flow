@@ -98,10 +98,13 @@ async def document_gallery(
             data=cached,
         )
 
-    docs, _total = await document_service.list_active_documents_for_home(
+    docs, _total, file_ids_by_doc = await document_service.list_active_documents_for_home(
         db, doc_type_enum, page, page_size
     )
-    out_list = [document_service.home_by_type_preview(d) for d in docs]
+    out_list = [
+        document_service.home_by_type_preview(d, revision_file_ids=file_ids_by_doc.get(d.id, []))
+        for d in docs
+    ]
 
     await cache_set(cache_key, out_list, ttl=settings.ITEM_DETAIL_CACHE_TTL_SECONDS)
     return APIResponse(

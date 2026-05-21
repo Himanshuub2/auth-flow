@@ -336,13 +336,33 @@ async def list_documents(
     return docs, total
 
 
+async def _latest_revision_file_ids_by_document(
+    db: AsyncSession,
+    document_ids: list[int],
+) -> dict[int, list[int]]:
+    """Latest revision ``file_ids`` per document (PostgreSQL DISTINCT ON document_id)."""
+    if not document_ids:
+        return {}
+    rows = await db.execute(
+        select(DocumentRevision.document_id, DocumentRevision.file_ids)
+        .where(DocumentRevision.document_id.in_(document_ids))
+        .distinct(DocumentRevision.document_id)
+        .order_by(
+            DocumentRevision.document_id,
+            DocumentRevision.revision_number.desc(),
+            DocumentRevision.media_version.desc(),
+        )
+    )
+    return {doc_id: list(file_ids or []) for doc_id, file_ids in rows.all()}
+
+
 async def list_active_documents_for_home(
     db: AsyncSession,
     document_type: DocumentType,
     page: int,
     page_size: int,
-) -> tuple[list[Document], int]:
-    """Active docs of one type with `Document.files` only (no creator, no revisions join)."""
+) -> tuple[list[Document], int, dict[int, list[int]]]:
+    """Active docs of one type; latest revision file_ids loaded via revision table."""
     filters = (
         Document.document_type == document_type,
         Document.status == DocumentStatus.ACTIVE,
@@ -375,17 +395,29 @@ async def list_active_documents_for_home(
         .limit(page_size)
     )
     docs = list((await db.execute(query)).scalars().all())
-    return docs, total
+    file_ids_by_doc = await _latest_revision_file_ids_by_document(db, [d.id for d in docs])
+    return docs, total, file_ids_by_doc
 
 
-def home_by_type_preview(doc: Document) -> dict:
+def home_by_type_preview(
+    doc: Document,
+    *,
+    revision_file_ids: list[int] | None = None,
+) -> dict:
     """Minimal home/gallery payload: id, name, document_type, files with SAS URLs.
 
-    Uses rows in ``document_files`` for this document, ordered by ``sort_order``.
-    No revision table access — suitable for simple home galleries (e.g. Latest News).
+    Only includes files listed on the document's latest revision (``file_ids``).
     """
     storage = get_storage()
-    files_sorted = sorted(doc.files or [], key=lambda f: f.sort_order)
+    target_file_ids = set(
+        revision_file_ids
+        if revision_file_ids is not None
+        else _get_current_file_ids_sync(doc)
+    )
+    files_sorted = sorted(
+        (f for f in (doc.files or []) if f.id in target_file_ids),
+        key=lambda f: f.sort_order,
+    )
     files_out: list[dict] = []
     for f in files_sorted:
         if f.file_type != DocumentFileType.IMAGE:
