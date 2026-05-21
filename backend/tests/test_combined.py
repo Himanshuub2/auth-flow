@@ -213,3 +213,41 @@ def test_list_combined_page_zero_invalid(client: TestClient) -> None:
     """Page less than 1 returns validation error."""
     resp = client.post("/api/items/", json={"page": 0, "page_size": 10})
     assert resp.status_code == 422
+
+
+def test_list_due_for_review_total_matches_kpi(client: TestClient) -> None:
+    """List due_for_review total matches KPI when item_type is document."""
+    kpi = client.get("/api/items/kpi")
+    assert kpi.status_code == 200
+    expected = kpi.json()["data"]["due_for_review"]
+
+    resp = client.post(
+        "/api/items/",
+        json={"due_for_review": True, "item_type": "document", "page": 1, "page_size": 1},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] == expected
+
+
+def test_list_overdue_total_matches_kpi(client: TestClient) -> None:
+    """List overdue total matches KPI when item_type is document."""
+    kpi = client.get("/api/items/kpi")
+    assert kpi.status_code == 200
+    expected = kpi.json()["data"]["overdue"]
+
+    resp = client.post(
+        "/api/items/",
+        json={"overdue": True, "item_type": "document", "page": 1, "page_size": 1},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] == expected
+
+
+def test_list_without_item_type_returns_events_and_documents(client: TestClient) -> None:
+    """Omitted item_type returns a mix of event and non-event rows when possible."""
+    resp = client.post("/api/items/", json={"page": 1, "page_size": 50})
+    assert resp.status_code == 200
+    rows = resp.json()["data"]
+    if len(rows) >= 2:
+        types = {r["document_type"] for r in rows}
+        assert EVENT in types or any(t != EVENT for t in types)

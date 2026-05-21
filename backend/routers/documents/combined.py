@@ -46,6 +46,8 @@ async def list_combined(
         last_updated_end=payload.last_updated_end,
         next_review_start=payload.next_review_start,
         next_review_end=payload.next_review_end,
+        due_for_review=payload.due_for_review,
+        overdue=payload.overdue,
         search=payload.search,
     )
     logger.info("list_combined total=%s page=%s", total, payload.page)

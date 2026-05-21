@@ -49,7 +49,7 @@ Based on **next_review_date** (documents only):
 
 | Method | URL | Body |
 |--------|-----|--------|
-| POST | `/api/items/` | JSON (all optional): `page`, `page_size`, `item_type`, `document_types`, `document_names`, `statuses`, `last_updated_start`, `last_updated_end`, `next_review_start`, `next_review_end`, `search` |
+| POST | `/api/items/` | JSON (all optional): `page`, `page_size`, `item_type`, `document_types`, `document_names`, `statuses`, `last_updated_start`, `last_updated_end`, `next_review_start`, `next_review_end`, `due_for_review`, `overdue`, `search` |
 
 All parameters are in the request body. Empty body or omitted fields use defaults (e.g. `page`: 1, `page_size`: 20).
 
@@ -58,6 +58,9 @@ All parameters are in the request body. Empty body or omitted fields use default
 - **statuses**: array; `DRAFT`, `ACTIVE`, `INACTIVE`.
 - **last_updated_start** / **last_updated_end**: filter by `updated_at` date range (YYYY-MM-DD).
 - **next_review_start** / **next_review_end**: filter documents by `next_review_date` range (ignored for events).
+- **item_type**: omit (or null/empty) to return **both** events and documents; `event` or `document` to restrict to one kind.
+- **due_for_review**: `true` — **documents only** with `next_review_date` set and `>= today` (events excluded; no null review dates).
+- **overdue**: `true` — **documents only** with `next_review_date` set and `< today`. List `total` matches KPI when used with `item_type: "document"` and no extra filters. Do not send both `due_for_review` and `overdue` together.
 - **search**: ILIKE on document/event name.
 
 **Example:** `POST /api/items/` with body:
@@ -270,7 +273,7 @@ Same response shape as **Get item detail** with `item_type=document` (see above)
 ```json
 {
   "name": "testing doc",
-  "document_type": "Policy",
+  "document_type": "FAQ",
   "tags": ["hr", "policy"],
   "summary": "some summary",
   "legislation_id": null,

@@ -7,7 +7,7 @@ import logging
 from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, func, union_all, literal, String
+from sqlalchemy import and_, select, func, union_all, literal, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cache import cache_get, cache_set
@@ -38,6 +38,37 @@ logger = logging.getLogger(__name__)
 ITEM_DETAIL_CACHE_TTL = getattr(
     settings, "ITEM_DETAIL_CACHE_TTL_SECONDS", 300
 )
+
+
+def _document_due_for_review(today: date):
+    """Documents with a review date on or after today (matches KPI due_for_review)."""
+    return and_(
+        Document.next_review_date.isnot(None),
+        Document.next_review_date >= today,
+    )
+
+
+def _document_overdue(today: date):
+    """Documents with a review date before today (matches KPI overdue)."""
+    return and_(
+        Document.next_review_date.isnot(None),
+        Document.next_review_date < today,
+    )
+
+
+def _normalize_item_type(item_type: str | None) -> str | None:
+    """None or blank → both events and documents; otherwise 'event' or 'document'."""
+    if item_type is None:
+        return None
+    normalized = item_type.strip().lower()
+    if not normalized:
+        return None
+    if normalized not in (EVENT, DOCUMENT):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="item_type must be 'event' or 'document'",
+        )
+    return normalized
 
 
 async def list_combined(
@@ -207,9 +238,9 @@ async def get_items_kpi(db: AsyncSession) -> ItemsKpiOut:
         if label:
             by_type[label] = r.cnt
 
-    # Documents: overdue (next_review_date < today) and due for review (next_review_date >= today)
-    doc_overdue_q = select(func.count()).select_from(Document).where(Document.next_review_date < today)
-    doc_due_q = select(func.count()).select_from(Document).where(Document.next_review_date >= today)
+    # Documents: overdue / due for review (same predicates as POST /api/items/ list filters)
+    doc_overdue_q = select(func.count()).select_from(Document).where(_document_overdue(today))
+    doc_due_q = select(func.count()).select_from(Document).where(_document_due_for_review(today))
     doc_overdue = (await db.execute(doc_overdue_q)).scalar() or 0
     doc_due = (await db.execute(doc_due_q)).scalar() or 0
 
@@ -259,6 +290,8 @@ async def list_combined_filtered(
     last_updated_end: date | None = None,
     next_review_start: date | None = None,
     next_review_end: date | None = None,
+    due_for_review: bool | None = None,
+    overdue: bool | None = None,
     search: str | None = None,
 ) -> tuple[list[CombinedItemOut], int]:
     """
@@ -266,12 +299,25 @@ async def list_combined_filtered(
     document_types: include only these types (AND); use "event" for events. Multiple = include any of them.
     document_names: include only these names (exact match, multiple).
     statuses: filter by status (DRAFT, ACTIVE, INACTIVE).
+    due_for_review / overdue: documents with next_review_date set only; events excluded.
+    item_type omitted: return both events and documents unless due_for_review/overdue is set.
     search: ILIKE on document/event name (applied in same API).
     """
+    item_type_norm = _normalize_item_type(item_type)
+
+    if due_for_review and overdue:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use due_for_review or overdue, not both",
+        )
+
+    today = date.today()
+    review_filter = due_for_review is True or overdue is True
+
     cache_key = cache_keys.items_list(
         page=page,
         page_size=page_size,
-        item_type=item_type,
+        item_type=item_type_norm,
         document_types=document_types,
         document_names=document_names,
         statuses=statuses,
@@ -279,6 +325,8 @@ async def list_combined_filtered(
         last_updated_end=last_updated_end,
         next_review_start=next_review_start,
         next_review_end=next_review_end,
+        due_for_review=due_for_review,
+        overdue=overdue,
         search=search,
     )
     cached = await cache_get(cache_key)
@@ -305,9 +353,14 @@ async def list_combined_filtered(
         )
         .select_from(Event)
     )
-    if not include_events and doc_enum_list is not None:
-        event_q = event_q.where(literal(False))  # exclude events
-    else:
+    exclude_events = (
+        item_type_norm == DOCUMENT
+        or review_filter
+        or (doc_enum_list is not None and not include_events)
+    )
+    if exclude_events:
+        event_q = event_q.where(literal(False))
+    elif item_type_norm != DOCUMENT:
         if document_names:
             event_q = event_q.where(Event.event_name.in_(document_names))
         if statuses:
@@ -358,12 +411,16 @@ async def list_combined_filtered(
         doc_q = doc_q.where(Document.next_review_date >= next_review_start)
     if next_review_end is not None:
         doc_q = doc_q.where(Document.next_review_date <= next_review_end)
+    if due_for_review is True:
+        doc_q = doc_q.where(_document_due_for_review(today))
+    if overdue is True:
+        doc_q = doc_q.where(_document_overdue(today))
     if search and search.strip():
         doc_q = doc_q.where(Document.name.ilike(f"%{search.strip()}%"))
 
-    if item_type == EVENT:
+    if item_type_norm == EVENT:
         combined = event_q.subquery()
-    elif item_type == DOCUMENT:
+    elif item_type_norm == DOCUMENT:
         combined = doc_q.subquery()
     else:
         combined = union_all(event_q, doc_q).subquery()
@@ -371,9 +428,14 @@ async def list_combined_filtered(
     count_q = select(func.count()).select_from(combined)
     total = (await db.execute(count_q)).scalar() or 0
 
+    order_by = (
+        (combined.c.next_review_date.asc(), combined.c.updated_at.desc())
+        if review_filter
+        else (combined.c.updated_at.desc(),)
+    )
     rows_q = (
         select(combined)
-        .order_by(combined.c.updated_at.desc())
+        .order_by(*order_by)
         .offset((page - 1) * page_size)
         .limit(page_size)
     )

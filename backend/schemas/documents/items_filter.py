@@ -10,7 +10,10 @@ class ItemsListBody(BaseModel):
 
     page: int = Field(1, ge=1, description="Page number")
     page_size: int = Field(20, ge=1, le=100, description="Items per page")
-    item_type: str | None = Field(None, description="Filter by 'event' or 'document'")
+    item_type: str | None = Field(
+        None,
+        description="Omit for both events and documents; or 'event' / 'document' for one kind",
+    )
     document_types: list[str] | None = Field(None, description="Filter by type: Policy, Guidance Note, EWS, event, etc.")
     document_names: list[str] | None = Field(None, description="Filter by exact name(s)")
     statuses: list[str] | None = Field(None, description="Filter by status: DRAFT, ACTIVE, INACTIVE")
@@ -18,6 +21,14 @@ class ItemsListBody(BaseModel):
     last_updated_end: date | None = Field(None, description="Last updated to date")
     next_review_start: date | None = Field(None, description="Next review from date")
     next_review_end: date | None = Field(None, description="Next review to date")
+    due_for_review: bool | None = Field(
+        None,
+        description="Documents only: next_review_date >= today. List total matches GET /api/items/kpi due_for_review when no other filters.",
+    )
+    overdue: bool | None = Field(
+        None,
+        description="Documents only: next_review_date < today. List total matches GET /api/items/kpi overdue when no other filters.",
+    )
     search: str | None = Field(None, description="Search in document/event name (ILIKE)")
 
 
