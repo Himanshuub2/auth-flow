@@ -5,7 +5,7 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import async_session_factory, get_db
@@ -16,7 +16,6 @@ from schemas.documents.bulk_applicability import (
 )
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from services.documents import bulk_applicability_service as svc
-from storage import get_storage
 from utils.security import CurrentUser, is_active_master_or_policy_or_kh_admin
 
 logger = logging.getLogger(__name__)
@@ -30,12 +29,6 @@ SSE_HEARTBEAT_SEC = 20.0
 
 def _sse_chunk(event: dict) -> bytes:
     return f"data: {json.dumps(event)}\n\n".encode("utf-8")
-
-_CONTENT_TYPE_BY_EXT = {
-    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "xls": "application/vnd.ms-excel",
-    "csv": "text/csv; charset=utf-8",
-}
 
 
 def _get_extension(filename: str) -> str:
@@ -90,19 +83,17 @@ async def upload_bulk_file(
 
     slug = uuid.uuid4().hex[:12]
     safe_name = os.path.basename(file.filename)
-    blob_path = f"{BLOB_PREFIX}/{slug}/{safe_name}"
-    storage = get_storage()
-    content_type = file.content_type or _CONTENT_TYPE_BY_EXT.get(ext)
+    file_path = f"{BLOB_PREFIX}/{slug}/{safe_name}"
     try:
-        await storage.save(file, blob_path, content_type=content_type)
+        await svc.save_bulk_upload_local(file, file_path)
     except Exception:
-        logger.exception("Azure upload failed for bulk applicability")
-        raise HTTPException(502, detail="Failed to upload file to blob storage.")
+        logger.exception("Local save failed for bulk applicability")
+        raise HTTPException(502, detail="Failed to save upload file locally.")
 
     req = await svc.create_upload_request(
         db,
         file_name=file.filename,
-        blob_path=blob_path,
+        blob_path=file_path,
         selected_types=types_list,
         change_remarks=change_remarks,
         user_id=user.id,
@@ -149,6 +140,21 @@ async def upload_bulk_file(
     )
 
 
+@router.get("/history/{request_id}/file")
+async def download_history_file(
+    request_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
+):
+    item = await svc.get_history_by_id(db, request_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Bulk applicability request not found")
+    path = svc.local_upload_path(item.uploaded_file_url)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Upload file not found")
+    return FileResponse(path, filename=item.file_name)
+
+
 @router.get("/history", response_model=APIResponsePaginated)
 async def get_history(
     page: int = Query(1, ge=1),
@@ -160,13 +166,15 @@ async def get_history(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(is_active_master_or_policy_or_kh_admin),
 ):
-    storage = get_storage()
-
     if request_id is not None:
         item = await svc.get_history_by_id(db, request_id)
         if item is None:
             raise HTTPException(status_code=404, detail="Bulk applicability request not found")
-        file_sas_url = storage.get_read_url(item.uploaded_file_url)
+        if svc.local_upload_exists(item.uploaded_file_url):
+            file_sas_url = f"/api/bulk-applicability/history/{item.id}/file"
+        else:
+            from storage import get_storage
+            file_sas_url = get_storage().get_read_url(item.uploaded_file_url)
         data = [
             BulkApplicabilityHistoryItem(
                 id=item.id,

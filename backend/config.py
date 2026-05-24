@@ -41,7 +41,10 @@ class Settings(BaseSettings):
     # ── Azure Blob Storage ────────────────────────────────────────────────
     AZURE_STORAGE_CONNECTION_STRING: str = ""
     AZURE_CONTAINER_NAME: str = "uploads"
-    BYPASS_AZURE_UPLOAD: bool = False
+    BYPASS_AZURE_UPLOAD: bool = True
+
+    # ── Local uploads (bulk applicability dev) ───────────────────────────
+    BULK_APPLICABILITY_UPLOAD_DIR: str = "uploads/bulk-applicability"
 
     class Config:
         env_file = ".env"

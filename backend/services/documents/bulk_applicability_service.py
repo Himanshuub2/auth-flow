@@ -8,7 +8,9 @@ import asyncio
 import io
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
+from fastapi import UploadFile
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -33,11 +35,41 @@ from models.events.event import (
     ApplicabilityType as EventApplicabilityType,
 )
 from models.events.user import User
-from storage import get_storage
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_UPLOAD_EXTENSIONS = frozenset({"xlsx", "csv", "xls"})
+
+
+def _local_upload_root() -> Path:
+    root = Path(settings.BULK_APPLICABILITY_UPLOAD_DIR)
+    if not root.is_absolute():
+        root = Path(__file__).resolve().parents[2] / root
+    return root
+
+
+def local_upload_path(relative_key: str) -> Path:
+    return _local_upload_root() / relative_key.replace("\\", "/")
+
+
+def local_upload_exists(relative_key: str) -> bool:
+    return local_upload_path(relative_key).is_file()
+
+
+async def save_bulk_upload_local(file: UploadFile, relative_key: str) -> str:
+    dest = local_upload_path(relative_key)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    data = await file.read()
+    await asyncio.to_thread(dest.write_bytes, data)
+    return relative_key
+
+
+async def read_bulk_upload_bytes(relative_key: str) -> bytes:
+    path = local_upload_path(relative_key)
+    if not path.is_file():
+        raise FileNotFoundError(f"Upload file not found: {relative_key}")
+    return await asyncio.to_thread(path.read_bytes)
 
 # Row 1: A–D empty, then organization_vertical above each division column (not a data column).
 # Row 2: id, type, name, updated_at, then division_cluster headers.
@@ -280,8 +312,7 @@ async def _process_single_request(
     # transaction, rollback would undo the new bulk_applicability row so UPDATE … FAILED
     # would match 0 rows.
     try:
-        storage = get_storage()
-        file_bytes = await storage.read_bytes(req.uploaded_file_url.strip())
+        file_bytes = await read_bulk_upload_bytes(req.uploaded_file_url.strip())
         parsed_rows = await asyncio.to_thread(
             _parse_uploaded_file_from_bytes, file_bytes, req.file_name
         )
@@ -313,7 +344,31 @@ async def _process_single_request(
 def _cell_str(value: object) -> str:
     if value is None:
         return ""
-    return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    return str(value).strip()
+
+
+def _parse_integer_cell(value: str) -> int | None:
+    """Parse id cells from Excel (often '2.0') or plain integers."""
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        num = float(text)
+        if num.is_integer():
+            return int(num)
+    except ValueError:
+        return None
+    return None
 
 
 def _prepare_indices(
@@ -354,9 +409,8 @@ def _append_parsed_row(
         errors.append(f"Row {row_num}: missing 'id'")
         return
 
-    try:
-        int(row_id)
-    except ValueError:
+    item_id = _parse_integer_cell(row_id)
+    if item_id is None:
         errors.append(f"Row {row_num}: 'id' must be an integer, got '{row_id}'")
         return
 
@@ -385,7 +439,7 @@ def _append_parsed_row(
         return
 
     parsed.append({
-        "id": int(row_id),
+        "id": item_id,
         "type": row_type,
         "divisions": sorted(matched_divisions),
         "row_num": row_num,
@@ -401,13 +455,63 @@ def _raise_if_errors(errors: list[str]) -> None:
 
 
 def _parse_uploaded_file_from_bytes(data: bytes, file_name: str) -> list[dict]:
-    """Parse file body downloaded from Azure. CSV uses StringIO; Excel uses in-memory workbook."""
+    """Parse uploaded bulk file (CSV, xlsx, or legacy xls)."""
+    if not data:
+        raise ValueError("Uploaded file is empty")
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     if ext == "csv":
         return _parse_csv_bytes(data)
-    if ext in ("xlsx", "xls"):
-        return _parse_excel_from_bytes(data)
+    if ext == "xlsx":
+        return _parse_xlsx_from_bytes(data)
+    if ext == "xls":
+        return _parse_xls_from_bytes(data)
     raise ValueError(f"Unsupported file extension: {ext}")
+
+
+def _parse_xlsx_from_bytes(file_bytes: bytes) -> list[dict]:
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except OSError as exc:
+        raise ValueError(
+            "Could not read Excel file. Use .xlsx (Excel 2007+) or export as CSV."
+        ) from exc
+    try:
+        return _consume_excel_row_iterator(wb.active.iter_rows(values_only=True))
+    finally:
+        wb.close()
+
+
+def _parse_xls_from_bytes(file_bytes: bytes) -> list[dict]:
+    # Modern Excel often saves xlsx content with a .xls extension.
+    if file_bytes[:2] == b"PK":
+        return _parse_xlsx_from_bytes(file_bytes)
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise ValueError("Legacy .xls support is not installed. Save the file as .xlsx or CSV.") from exc
+    try:
+        book = xlrd.open_workbook(file_contents=file_bytes)
+    except xlrd.XLRDError as exc:
+        raise ValueError(
+            "Could not read .xls file. Save as .xlsx (Excel 2007+) or CSV and re-upload."
+        ) from exc
+    sheet = book.sheet_by_index(0)
+    rows = (
+        tuple(sheet.cell_value(row_idx, col_idx) for col_idx in range(sheet.ncols))
+        for row_idx in range(sheet.nrows)
+    )
+    return _consume_excel_row_iterator(rows)
+
+
+def _parse_excel_from_bytes(file_bytes: bytes) -> list[dict]:
+    """Backward-compatible alias; prefer extension-specific parsers."""
+    if file_bytes[:2] == b"PK":
+        return _parse_xlsx_from_bytes(file_bytes)
+    return _parse_xls_from_bytes(file_bytes)
+
+
+def _consume_excel_rows(ws) -> list[dict]:
+    return _consume_excel_row_iterator(ws.iter_rows(values_only=True))
 
 
 def _parse_csv_bytes(data: bytes) -> list[dict]:
@@ -442,16 +546,8 @@ def _parse_csv_bytes(data: bytes) -> list[dict]:
     return parsed
 
 
-def _parse_excel_from_bytes(file_bytes: bytes) -> list[dict]:
-    wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
-    try:
-        return _consume_excel_rows(wb.active)
-    finally:
-        wb.close()
-
-
-def _consume_excel_rows(ws) -> list[dict]:
-    it = ws.iter_rows(values_only=True)
+def _consume_excel_row_iterator(row_iter) -> list[dict]:
+    it = iter(row_iter)
     try:
         r0 = next(it)
         r1 = next(it)
