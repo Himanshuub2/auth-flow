@@ -1,6 +1,6 @@
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import (
@@ -131,7 +131,8 @@ async def save_document(
     doc.legislation_id = payload.legislation_id
     doc.sub_legislation_id = payload.sub_legislation_id
     doc.version = payload.version
-    doc.next_review_date = payload.next_review_date
+    if payload.next_review_date is not None or is_new:
+        doc.next_review_date = payload.next_review_date
     doc.download_allowed = payload.download_allowed
     doc.linked_document_ids = payload.linked_document_ids or []
     doc.applicability_type = payload.applicability_type
@@ -1173,6 +1174,23 @@ async def _get_active_singleton_document(
     return result.scalar_one_or_none()
 
 
+def _validate_next_review_date(
+    payload_date: date | None,
+    existing_date: date | None,
+) -> None:
+    """Allow unchanged past dates; require today or future when changing the review date."""
+    if payload_date is None:
+        return
+    if payload_date >= date.today():
+        return
+    if existing_date is not None and payload_date == existing_date:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="next_review_date cannot be set to a past date. Use today or a future date, or keep the current review date.",
+    )
+
+
 async def _validate_document_save_request(
     db: AsyncSession,
     payload: DocumentSavePayload,
@@ -1180,6 +1198,11 @@ async def _validate_document_save_request(
     *,
     is_new: bool,
 ) -> None:
+    _validate_next_review_date(
+        payload.next_review_date,
+        None if is_new else existing_doc.next_review_date,
+    )
+
     if payload.document_type == DocumentType.FAQ and payload.linked_document_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
