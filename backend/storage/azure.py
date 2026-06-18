@@ -152,6 +152,27 @@ class AzureBlobStorageBackend(StorageBackend):
         except Exception:
             logger.warning("Azure blob delete failed: %s/%s", self._container_name, path, exc_info=True)
 
+    async def save_bytes(
+        self, data: bytes, destination: str, *, content_type: str | None = None,
+    ) -> str:
+        if self._bypass:
+            logger.debug("Bypass: skipping Azure save_bytes for %s", destination)
+            return destination
+        try:
+            from azure.storage.blob import ContentSettings  # type: ignore[attr-defined]
+
+            container = await self._get_container()
+            blob = container.get_blob_client(destination)
+            cs = ContentSettings(content_type=content_type) if content_type else None
+            await blob.upload_blob(
+                data, overwrite=True, content_settings=cs, logging_enable=False,
+            )
+            logger.info("Azure blob saved (bytes): %s/%s", self._container_name, destination)
+            return destination
+        except Exception:
+            logger.exception("Azure blob save_bytes failed: %s/%s", self._container_name, destination)
+            raise
+
     async def read_bytes(self, path: str) -> bytes:
         """Download full blob body for server-side processing (e.g. bulk applicability)."""
         if self._bypass:
@@ -253,6 +274,11 @@ class AzureBlobStorageBackend(StorageBackend):
     def get_url(self, path: str) -> str:
         """Return a read SAS URL for the given blob path with a 10-minute expiry."""
         return self._generate_sas_url(path, read=True, expiry_minutes=10)
+
+    def get_blob_path(self, url: str) -> str | None:
+        if "://" not in url:
+            return url
+        return _blob_path_from_url(url, self._container_name)
 
     def get_container_upload_sas(self, expiry_minutes: int = 120) -> tuple[str, str]:
         """

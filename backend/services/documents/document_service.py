@@ -1,3 +1,4 @@
+import json
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -190,6 +191,7 @@ async def save_document(
 
     await db.flush()
     await db.refresh(doc)
+    await _sync_document_metadata(db, doc)
     return await get_document_for_detail(db, doc.id)
 
 
@@ -456,6 +458,7 @@ async def toggle_document_status(
     doc.updated_by = user.id if user else None
     await db.flush()
     await db.refresh(doc)
+    await _sync_document_metadata(db, doc)
     return doc
 
 
@@ -1480,6 +1483,7 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
 
     await db.flush()
     await db.refresh(draft)
+    await _sync_document_metadata(db, parent)
     return draft
 
 
@@ -1574,6 +1578,65 @@ async def _validate_version_unique(db: AsyncSession, version: float, *, exclude_
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Version {version} already exists for another document",
         )
+
+
+async def _sync_document_metadata(db: AsyncSession, doc: Document) -> None:
+    """Build and upload a metadata JSON to blob storage for downstream AI chunking."""
+    storage = get_storage()
+
+    file_ids = await _get_current_file_ids(db, doc)
+    all_files = await _get_all_files(db, doc.id)
+    file_by_id = {f.id: f for f in all_files}
+
+    file_paths: list[str] = []
+    for fid in file_ids:
+        f = file_by_id.get(fid)
+        if not f:
+            continue
+        blob_path = storage.get_blob_path(f.file_url)
+        if blob_path:
+            file_paths.append(blob_path)
+
+    all_file_paths: list[str] = []
+    for f in all_files:
+        blob_path = storage.get_blob_path(f.file_url)
+        if blob_path:
+            all_file_paths.append(blob_path)
+
+    current_set = set(file_paths)
+    removed_files: list[str] = []
+    seen_removed: set[str] = set()
+    for path in all_file_paths:
+        if path in current_set or path in seen_removed:
+            continue
+        removed_files.append(path)
+        seen_removed.add(path)
+    added_files = list(dict.fromkeys(file_paths))
+
+    if doc.applicability_type == ApplicabilityType.EMPLOYEE:
+        data = list(doc.applicability_refs or [])
+    else:
+        data = None
+
+    metadata = {
+        "files": file_paths,
+        "added_files": added_files,
+        "removed_files": removed_files,
+        "applicability": doc.applicability_type.value.lower(),
+        "data": data,
+        "status": doc.status.value.lower(),
+        "revision": doc.revision,
+    }
+
+    doc_type = doc.document_type.value.lower()
+    dest = f"documents/{doc_type}/{doc.id}/{doc.id}.json"
+
+    try:
+        payload = json.dumps(metadata, indent=2).encode("utf-8")
+        await storage.save_bytes(payload, dest, content_type="application/json")
+        logger.info("Synced metadata JSON for document %s at %s", doc.id, dest)
+    except Exception:
+        logger.warning("Failed to sync metadata JSON for document %s", doc.id, exc_info=True)
 
 
 async def _sync_staging(
