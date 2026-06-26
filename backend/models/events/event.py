@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import BaseEvents
+from utils.dates import format_event_date_range, parse_event_date_range
 
 SCHEMA = "events"
 USERS_SCHEMA = "users"
@@ -32,7 +33,8 @@ class Event(BaseEvents):
 
     event_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     sub_event_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    event_dates: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    event_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    event_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
@@ -88,6 +90,14 @@ class Event(BaseEvents):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def event_dates(self) -> list[str] | None:
+        return format_event_date_range(self.event_start, self.event_end)
+
+    @event_dates.setter
+    def event_dates(self, value: list[str] | None) -> None:
+        self.event_start, self.event_end = parse_event_date_range(value)
+
 
 class EventRevision(BaseEvents):
     """Immutable snapshot created only when an event is published."""
@@ -106,7 +116,8 @@ class EventRevision(BaseEvents):
 
     event_name: Mapped[str] = mapped_column(String(255), nullable=False)
     sub_event_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    event_dates: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    event_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    event_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
@@ -127,3 +138,11 @@ class EventRevision(BaseEvents):
 
     event: Mapped["Event"] = relationship(back_populates="revisions", lazy="raise")
     creator: Mapped["User"] = relationship(lazy="joined", foreign_keys=[created_by])
+
+    @property
+    def event_dates(self) -> list[str] | None:
+        return format_event_date_range(self.event_start, self.event_end)
+
+    @event_dates.setter
+    def event_dates(self, value: list[str] | None) -> None:
+        self.event_start, self.event_end = parse_event_date_range(value)

@@ -5,6 +5,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from models.events.event import ApplicabilityType, EventStatus
 from models.events.event_media_item import FileType
+from utils.dates import format_event_date_range, parse_event_date_range
 
 
 class FileMetadataIn(BaseModel):
@@ -33,7 +34,7 @@ class FileMetadataIn(BaseModel):
 class EventSavePayload(BaseModel):
     event_name: str
     sub_event_name: str | None = None
-    event_dates: list[str] | dict | None = None
+    event_dates: list[str] | None = None
     description: str | None = None
     tags: list[str] | None = None
     applicability_type: ApplicabilityType = ApplicabilityType.ALL
@@ -49,6 +50,12 @@ class EventSavePayload(BaseModel):
         if v <= 0:
             raise ValueError("version must be greater than 0")
         return v
+
+    @field_validator("event_dates")
+    @classmethod
+    def validate_event_dates(cls, v: list[str] | None) -> list[str] | None:
+        event_start, event_end = parse_event_date_range(v)
+        return format_event_date_range(event_start, event_end)
 
 
 class UploadUrlRequest(BaseModel):

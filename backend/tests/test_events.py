@@ -1,10 +1,12 @@
 """Tests for Events API: create, draft, revisions, version."""
 
+from datetime import date
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from models.events.event import EventStatus
+from models.events.event import Event, EventRevision, EventStatus
+from schemas.events.event import EventSavePayload
 
 
 def _uniq(prefix: str) -> str:
@@ -30,6 +32,34 @@ def _event_payload(
     }
     data.update(kwargs)
     return data
+
+
+def test_event_dates_parse_to_columns_and_return_array() -> None:
+    """Event date storage uses start/end columns while preserving FE array format."""
+    event = Event()
+    event.event_dates = ["2026/06/26", "2026/06/30"]
+
+    assert event.event_start == date(2026, 6, 26)
+    assert event.event_end == date(2026, 6, 30)
+    assert event.event_dates == ["2026/06/26", "2026/06/30"]
+
+
+def test_revision_dates_parse_to_columns_and_return_array() -> None:
+    revision = EventRevision()
+    revision.event_dates = ["2026/06/26", "2026/06/30"]
+
+    assert revision.event_start == date(2026, 6, 26)
+    assert revision.event_end == date(2026, 6, 30)
+    assert revision.event_dates == ["2026/06/26", "2026/06/30"]
+
+
+def test_event_payload_normalizes_event_dates() -> None:
+    payload = EventSavePayload(
+        event_name="Date Test",
+        event_dates=["2026/6/26", "2026/6/30"],
+    )
+
+    assert payload.event_dates == ["2026/06/26", "2026/06/30"]
 
 
 def test_create_event_as_draft(client: TestClient) -> None:

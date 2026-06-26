@@ -8,6 +8,48 @@ MONTH_ABBR: tuple[str, ...] = ("", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JU
 DateInput = Union[datetime, date, str, int, float]
 
 
+def parse_date_dmy_month_abbr(value: str) -> date:
+    """Parse 'DD/MON/YYYY' date strings from the frontend."""
+    try:
+        return datetime.strptime(value.strip().upper(), "%d/%b/%Y").date()
+    except Exception as exc:
+        raise ValueError(f"Cannot parse date value: {value!r}") from exc
+
+
+def parse_event_date(value: str) -> date:
+    """Parse event date strings in 'YYYY/MM/DD' format (e.g. '2026/06/26')."""
+    try:
+        return datetime.strptime(value.strip(), "%Y/%m/%d").date()
+    except Exception as exc:
+        raise ValueError(f"Cannot parse event date value: {value!r}") from exc
+
+
+def format_event_date(value: date | None) -> str | None:
+    """Format a date as 'YYYY/MM/DD' for event APIs."""
+    if value is None:
+        return None
+    return value.strftime("%Y/%m/%d")
+
+
+def parse_event_date_range(value: list[str] | tuple[str, str] | None) -> tuple[date | None, date | None]:
+    """Convert FE event_dates ['YYYY/MM/DD', 'YYYY/MM/DD'] into DB dates."""
+    if value is None:
+        return None, None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("event_dates must be an array with start and end dates")
+    return parse_event_date(value[0]), parse_event_date(value[1])
+
+
+def format_event_date_range(event_start: date | None, event_end: date | None) -> list[str] | None:
+    """Convert DB event_start/event_end dates into FE event_dates array."""
+    if event_start is None and event_end is None:
+        return None
+    return [
+        format_event_date(event_start),
+        format_event_date(event_end),
+    ]
+
+
 def format_date_dmy_month_abbr(value: DateInput | None) -> str | None:
     """
     Convert various date-like inputs into 'DD/MON/YYYY' (e.g. '05/MAR/2024').
@@ -35,6 +77,7 @@ def format_date_dmy_month_abbr(value: DateInput | None) -> str | None:
             from datetime import datetime as _dt
 
             patterns = [
+                "%d/%b/%Y",
                 "%d/%m/%Y",
                 "%m/%d/%Y",
                 "%Y-%m-%d",
