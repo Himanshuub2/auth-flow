@@ -293,6 +293,7 @@ async def list_combined_filtered(
     due_for_review: bool | None = None,
     overdue: bool | None = None,
     search: str | None = None,
+    cache_result: bool = True,
 ) -> tuple[list[CombinedItemOut], int]:
     """
     Paginated combined list with filters.
@@ -329,9 +330,10 @@ async def list_combined_filtered(
         overdue=overdue,
         search=search,
     )
-    cached = await cache_get(cache_key)
-    if cached is not None:
-        return [CombinedItemOut.model_validate(item) for item in cached["data"]], cached["total"]
+    if cache_result:
+        cached = await cache_get(cache_key)
+        if cached is not None:
+            return [CombinedItemOut.model_validate(item) for item in cached["data"]], cached["total"]
 
     doc_enum_list, include_events = _resolve_document_types(document_types)
 
@@ -468,14 +470,15 @@ async def list_combined_filtered(
         )
         for r in rows
     ]
-    await cache_set(
-        cache_key,
-        {
-            "total": total,
-            "data": [item.model_dump(mode="json") for item in data],
-        },
-        ttl=ITEM_DETAIL_CACHE_TTL,
-    )
+    if cache_result:
+        await cache_set(
+            cache_key,
+            {
+                "total": total,
+                "data": [item.model_dump(mode="json") for item in data],
+            },
+            ttl=ITEM_DETAIL_CACHE_TTL,
+        )
     return data, total
 
 

@@ -1,11 +1,19 @@
 """Combined events + documents: list, detail, revisions, snapshot, KPI, filter."""
 
+import io
 import logging
+from datetime import date, datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Body, Depends, Query
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from constants import DOCUMENT, EVENT
 from database import get_db
+from schemas.documents.combined import CombinedItemOut
 from schemas.documents.items_filter import ItemsListBody
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from services import items_service
@@ -14,6 +22,61 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+EXPORT_COLUMNS = (
+    ("id", "ID"),
+    ("name", "Name"),
+    ("document_type", "Document Type"),
+    ("status", "Status"),
+    ("created_by_name", "Created By Name"),
+    ("updated_at", "Updated At"),
+    ("deactivated_by", "Deactivated By"),
+    ("deactivated_by_name", "Deactivated By Name"),
+    ("deactivated_at", "Deactivated At"),
+    ("next_review_date", "Next Review Date"),
+    ("revision", "Revision"),
+    ("version", "Version"),
+)
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _excel_cell_value(value):
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
+
+def _build_combined_export_workbook(items: list[CombinedItemOut]) -> io.BytesIO:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Combined Items"
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for col_idx, (_, header) in enumerate(EXPORT_COLUMNS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+
+    for row_idx, item in enumerate(items, start=2):
+        for col_idx, (field, _) in enumerate(EXPORT_COLUMNS, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=_excel_cell_value(getattr(item, field)))
+
+    for col_idx, (_, header) in enumerate(EXPORT_COLUMNS, start=1):
+        max_length = len(header)
+        for cell in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=2, values_only=True):
+            for value in cell:
+                if value is not None:
+                    max_length = max(max_length, len(str(value)))
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max_length + 2, 40)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
 
 
 @router.get("/kpi", response_model=APIResponse)
@@ -59,6 +122,58 @@ async def list_combined(
         total=total,
         page=payload.page,
         page_size=payload.page_size,
+    )
+
+
+@router.post("/export")
+async def export_combined(
+    body: ItemsListBody | None = Body(None),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Export all events/documents matching the selected filters to an Excel file."""
+    payload = body or ItemsListBody()
+    _, total = await items_service.list_combined_filtered(
+        db,
+        page=1,
+        page_size=1,
+        item_type=payload.item_type,
+        document_types=payload.document_types,
+        document_names=payload.document_names,
+        statuses=payload.statuses,
+        last_updated_start=payload.last_updated_start,
+        last_updated_end=payload.last_updated_end,
+        next_review_start=payload.next_review_start,
+        next_review_end=payload.next_review_end,
+        due_for_review=payload.due_for_review,
+        overdue=payload.overdue,
+        search=payload.search,
+        cache_result=False,
+    )
+    data, _ = await items_service.list_combined_filtered(
+        db,
+        page=1,
+        page_size=max(total, 1),
+        item_type=payload.item_type,
+        document_types=payload.document_types,
+        document_names=payload.document_names,
+        statuses=payload.statuses,
+        last_updated_start=payload.last_updated_start,
+        last_updated_end=payload.last_updated_end,
+        next_review_start=payload.next_review_start,
+        next_review_end=payload.next_review_end,
+        due_for_review=payload.due_for_review,
+        overdue=payload.overdue,
+        search=payload.search,
+        cache_result=False,
+    )
+    logger.info("export_combined total=%s", total)
+
+    filename = f"combined-items-{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
+    return StreamingResponse(
+        _build_combined_export_workbook(data),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
