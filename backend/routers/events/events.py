@@ -1,11 +1,13 @@
-import asyncio
+from datetime import date
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from cache import cache_delete, cache_delete_prefix
 from database import get_db
-from models.events.event import Event, EventStatus
+from models.events.event import ApplicabilityType, Event, EventStatus
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from schemas.events.event import EventSavePayload, UploadUrlRequest, UploadUrlResponse
 from services.events import event_like_service
@@ -79,10 +81,6 @@ async def update_event(
 async def list_events(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: EventStatus | None = Query(
-        None,
-        description="Omit for ACTIVE-only (default). Pass DRAFT/INACTIVE to filter admin views.",
-    ),
     search: str | None = Query(
         None,
         max_length=500,
@@ -91,15 +89,22 @@ async def list_events(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    events, total = await event_service.list_events(db, page, page_size, status, search)
+    events, total = await event_service.list_events(
+        db,
+        page,
+        page_size,
+        search=search,
+        user_email=user.email,
+    )
     event_ids = [e.id for e in events]
     liked_ids = await event_like_service.event_ids_liked_by_user(db, user.id, event_ids)
-    file_ids_list = await asyncio.gather(
-        *[event_service.get_file_ids_for_event_list_card(db, e) for e in events]
-    )
     data = [
-        event_service.build_event_list_card(e, ids, liked_by_me=(e.id in liked_ids))
-        for e, ids in zip(events, file_ids_list)
+        event_service.build_event_list_card(
+            e,
+            list(e.staging_file_ids or []),
+            liked_by_me=(e.id in liked_ids),
+        )
+        for e in events
     ]
     return APIResponsePaginated(
         message="Events fetched",
@@ -110,6 +115,42 @@ async def list_events(
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/event/{event_id}", response_model=APIResponse)
+async def get_event_for_user(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Active event detail for end users (applicability + full staging media)."""
+    user_email = (user.email or "").strip().lower()
+    if not user_email:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+
+    today = date.today()
+    result = await db.execute(
+        select(Event)
+        .where(
+            Event.id == event_id,
+            Event.status == EventStatus.ACTIVE,
+            Event.event_start <= today,
+            Event.event_end >= today,
+            Event.applicability_type == ApplicabilityType.EMPLOYEE,
+            Event.applicability_refs.any(user_email),
+        )
+        .options(selectinload(Event.media_items), selectinload(Event.creator))
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    liked = await event_like_service.is_liked(db, user.id, event_id)
+    out = event_service.build_event_out(
+        event,
+        liked_by_me=liked,
+        file_ids=list(event.staging_file_ids or []),
+    )
+    return APIResponse(message="Event fetched", status_code=200, status="success", data=out)
 
 
 @router.post("/{event_id}/like", response_model=APIResponse)

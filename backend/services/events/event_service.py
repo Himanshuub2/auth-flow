@@ -1,11 +1,12 @@
 import logging
+from datetime import date
 
 from fastapi import HTTPException, status
 from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
-from models.events.event import Event, EventRevision, EventStatus
+from models.events.event import ApplicabilityType, Event, EventRevision, EventStatus
 from models.events.event_media_item import EventMediaItem, FileType
 from models.events.user import User
 from schemas.events.event import (
@@ -65,6 +66,9 @@ async def save_event(
 
     # if not is_new and payload.version != float(event.version):
     #     await _validate_version_unique(db, payload.version, exclude_id=event.id)
+    if payload.applicability_refs is not None:
+        payload.applicability_refs = [ref.lower() for ref in payload.applicability_refs]
+        payload.applicability_refs = list(set(payload.applicability_refs))  # remove duplicates 
 
     event.event_name = payload.event_name
     event.sub_event_name = payload.sub_event_name
@@ -215,9 +219,14 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
     )
 
 
-def build_event_out(event: Event, *, liked_by_me: bool = False) -> EventOut:
+def build_event_out(
+    event: Event,
+    *,
+    liked_by_me: bool = False,
+    file_ids: list[int] | None = None,
+) -> EventOut:
     """Build EventOut from loaded Event (with media_items and creator)."""
-    target_file_ids = _get_current_file_ids_sync(event)
+    target_file_ids = list(file_ids) if file_ids is not None else _get_current_file_ids_sync(event)
     file_by_id = {m.id: m for m in event.media_items}
     files = [
         _build_media_summary(m, event)
@@ -252,8 +261,9 @@ def build_event_out(event: Event, *, liked_by_me: bool = False) -> EventOut:
 
 
 async def get_file_ids_for_event_list_card(db: AsyncSession, event: Event) -> list[int]:
-    """Ordered file IDs for the event's current published/staging view (no in-memory revisions)."""
-    return await _get_current_file_ids(db, event)
+    """Ordered file IDs for GET /events list cards from events.staging_file_ids."""
+    _ = db
+    return list(event.staging_file_ids or [])
 
 
 def build_event_list_card(
@@ -293,17 +303,77 @@ def build_event_list_card(
     )
 
 
+def _normalized_applicability_refs(refs: list[str] | None) -> set[str]:
+    normalized: set[str] = set()
+    for ref in refs or []:
+        value = str(ref).strip().lower()
+        if value:
+            normalized.add(value)
+    return normalized
+
+
+def is_event_visible_to_user(
+    event: Event,
+    *,
+    user_email: str | None = None,
+    user_division: str | None = None,
+) -> bool:
+    kind = getattr(event.applicability_type, "value", event.applicability_type)
+    if kind == ApplicabilityType.ALL.value:
+        return True
+
+    refs = _normalized_applicability_refs(event.applicability_refs)
+    if not refs:
+        return False
+
+    if kind == ApplicabilityType.EMPLOYEE.value:
+        email = (user_email or "").strip().lower()
+        return bool(email) and email in refs
+
+    if kind == ApplicabilityType.DIVISION.value:
+        division = (user_division or "").strip().lower()
+        return bool(division) and division in refs
+
+    return False
+
+
+def ensure_event_visible_to_user(
+    event: Event,
+    *,
+    user_email: str | None = None,
+    user_division: str | None = None,
+    require_active: bool = False,
+) -> None:
+    if require_active and event.status != EventStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    if not is_event_visible_to_user(
+        event,
+        user_email=user_email,
+        user_division=user_division,
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+
+
 async def list_events(
     db: AsyncSession,
     page: int = 1,
     page_size: int = 20,
-    status_filter: EventStatus | None = None,
     search: str | None = None,
+    *,
+    user_email: str | None = None,
 ) -> tuple[list[Event], int]:
-    effective_status = status_filter if status_filter is not None else EventStatus.ACTIVE
+    normalized_email = (user_email or "").strip().lower()
+    if not normalized_email:
+        return [], 0
 
-    query = select(Event).where(Event.status == effective_status)
-    count_query = select(func.count()).select_from(Event).where(Event.status == effective_status)
+    today = date.today()
+    query = select(Event).where(
+        Event.status == EventStatus.ACTIVE,
+        Event.event_start <= today,
+        Event.event_end >= today,
+        Event.applicability_type == ApplicabilityType.EMPLOYEE,
+        Event.applicability_refs.any(normalized_email),
+    )
 
     if search and search.strip():
         term = f"%{search.strip()}%"
@@ -313,20 +383,18 @@ async def list_events(
             func.coalesce(cast(Event.tags, Text), "").ilike(term),
         )
         query = query.where(search_cond)
-        count_query = count_query.where(search_cond)
-
-    total = (await db.execute(count_query)).scalar() or 0
     query = (
         query.options(
             selectinload(Event.creator),
             selectinload(Event.media_items),
         )
         .order_by(Event.updated_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
     )
     events = list((await db.execute(query)).scalars().all())
-    return events, total
+
+    total = len(events)
+    start_idx = (page - 1) * page_size
+    return events[start_idx:start_idx + page_size], total
 
 
 async def toggle_event_status(
@@ -474,7 +542,7 @@ async def _publish_event(db: AsyncSession, event: Event) -> None:
         created_by=event.created_by,
     ))
 
-    event.staging_file_ids = []
+    event.staging_file_ids = published_file_ids
     event.status = EventStatus.ACTIVE
 
 
@@ -532,7 +600,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
     parent.status = EventStatus.INACTIVE
     draft.status = EventStatus.ACTIVE
     draft.replaces_document_id = None
-    draft.staging_file_ids = []
+    draft.staging_file_ids = published_file_ids
 
     await db.flush()
     await db.refresh(draft)
@@ -586,14 +654,40 @@ async def _get_all_files(db: AsyncSession, event_id: int) -> list[EventMediaItem
 def _get_current_file_ids_sync(event: Event) -> list[int]:
     """Get file IDs for the event's current state from loaded relations."""
     if event.status != EventStatus.DRAFT and event.revisions:
+        target_revision = int(getattr(event, "revision", 0) or 0)
+        if target_revision > 0:
+            matched = [r for r in event.revisions if int(r.revision_number) == target_revision]
+            if matched:
+                latest_for_revision = max(matched, key=lambda r: r.media_version)
+                return list(latest_for_revision.file_ids or [])
+
         latest = max(event.revisions, key=lambda r: (r.revision_number, r.media_version))
         return list(latest.file_ids or [])
     return list(event.staging_file_ids or [])
 
 
 async def _get_current_file_ids(db: AsyncSession, event: Event) -> list[int]:
-    """Get file IDs for the event's current state. Active -> latest revision; Draft -> staging."""
+    """Get file IDs for the event's current state.
+
+    Active/inactive reads by (event_id, event.revision), then falls back to latest.
+    Draft reads from staging_file_ids.
+    """
     if event.status != EventStatus.DRAFT:
+        target_revision = int(getattr(event, "revision", 0) or 0)
+        if target_revision > 0:
+            result = await db.execute(
+                select(EventRevision.file_ids)
+                .where(
+                    EventRevision.event_id == event.id,
+                    EventRevision.revision_number == target_revision,
+                )
+                .order_by(EventRevision.media_version.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if row is not None:
+                return list(row)
+
         result = await db.execute(
             select(EventRevision.file_ids)
             .where(EventRevision.event_id == event.id)

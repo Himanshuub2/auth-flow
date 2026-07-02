@@ -31,7 +31,7 @@ async def is_liked(db: AsyncSession, staff_id: str, event_id: int) -> bool:
 
 
 async def like_event(db: AsyncSession, event_id: int, staff_id: str) -> tuple[int, bool]:
-    event = await _get_event_for_like(db, event_id)
+    event = await _get_event_for_like(db, event_id, lock_for_update=True)
     existing = await db.execute(
         select(EventLike).where(
             EventLike.event_id == event_id,
@@ -49,7 +49,7 @@ async def like_event(db: AsyncSession, event_id: int, staff_id: str) -> tuple[in
 
 
 async def unlike_event(db: AsyncSession, event_id: int, staff_id: str) -> tuple[int, bool]:
-    event = await _get_event_for_like(db, event_id)
+    event = await _get_event_for_like(db, event_id, lock_for_update=True)
     result = await db.execute(
         delete(EventLike).where(
             EventLike.event_id == event_id,
@@ -65,8 +65,16 @@ async def unlike_event(db: AsyncSession, event_id: int, staff_id: str) -> tuple[
     return event.like_count, False
 
 
-async def _get_event_for_like(db: AsyncSession, event_id: int) -> Event:
-    result = await db.execute(select(Event).where(Event.id == event_id))
+async def _get_event_for_like(
+    db: AsyncSession,
+    event_id: int,
+    *,
+    lock_for_update: bool = False,
+) -> Event:
+    stmt = select(Event).where(Event.id == event_id)
+    if lock_for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     event = result.scalar_one_or_none()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")

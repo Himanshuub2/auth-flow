@@ -21,41 +21,45 @@ USERS = "users"
 
 
 def upgrade() -> None:
-    op.add_column(
-        "events",
-        sa.Column("like_count", sa.Integer(), nullable=False, server_default="0"),
-        schema=EVENTS,
+    # Idempotent: 0001_combined may already create like_count + event_likes on fresh installs.
+    op.execute(
+        sa.text(
+            f"""
+            ALTER TABLE {EVENTS}.events
+            ADD COLUMN IF NOT EXISTS like_count INTEGER NOT NULL DEFAULT 0;
+            """
+        )
     )
-    op.create_table(
-        "event_likes",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("event_id", sa.Integer(), nullable=False),
-        sa.Column("staff_id", sa.String(length=255), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(["event_id"], [f"{EVENTS}.events.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["staff_id"], [f"{USERS}.users.staff_id"]),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("event_id", "staff_id", name="uq_event_likes_event_staff"),
-        schema=EVENTS,
+    op.execute(
+        sa.text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {EVENTS}.event_likes (
+                id SERIAL PRIMARY KEY,
+                event_id INTEGER NOT NULL
+                    REFERENCES {EVENTS}.events(id) ON DELETE CASCADE,
+                staff_id VARCHAR(255) NOT NULL
+                    REFERENCES {USERS}.users(staff_id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT uq_event_likes_event_staff UNIQUE (event_id, staff_id)
+            );
+            """
+        )
     )
-    op.create_index(
-        "ix_events_event_likes_event_id",
-        "event_likes",
-        ["event_id"],
-        unique=False,
-        schema=EVENTS,
+    op.execute(
+        sa.text(
+            f"""
+            CREATE INDEX IF NOT EXISTS ix_events_event_likes_event_id
+                ON {EVENTS}.event_likes (event_id);
+            """
+        )
     )
-    op.create_index(
-        "ix_events_event_likes_staff_id",
-        "event_likes",
-        ["staff_id"],
-        unique=False,
-        schema=EVENTS,
+    op.execute(
+        sa.text(
+            f"""
+            CREATE INDEX IF NOT EXISTS ix_events_event_likes_staff_id
+                ON {EVENTS}.event_likes (staff_id);
+            """
+        )
     )
 
 

@@ -28,8 +28,27 @@ async def get_media_items(
 
 
 async def _get_current_file_ids(db: AsyncSession, event: Event) -> list[int]:
-    """Get file IDs for the event's current state."""
+    """Get file IDs for the event's current state.
+
+    Active/inactive reads by (event_id, event.revision), then falls back to latest.
+    Draft reads from staging_file_ids.
+    """
     if event.status != EventStatus.DRAFT:
+        target_revision = int(getattr(event, "revision", 0) or 0)
+        if target_revision > 0:
+            result = await db.execute(
+                select(EventRevision.file_ids)
+                .where(
+                    EventRevision.event_id == event.id,
+                    EventRevision.revision_number == target_revision,
+                )
+                .order_by(EventRevision.media_version.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if row is not None:
+                return list(row)
+
         result = await db.execute(
             select(EventRevision.file_ids)
             .where(EventRevision.event_id == event.id)

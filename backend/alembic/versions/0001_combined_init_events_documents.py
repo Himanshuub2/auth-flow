@@ -4,7 +4,8 @@ Single migration for fresh installs. Includes: schemas, tables,
 enums (event_status/document_status: DRAFT, ACTIVE, INACTIVE), and seed data.
 
 Schema matches post–bb46983d6af6 + 0004_version_revision_numeric_media + event_revisions
-applicability (applicability_type enum, applicability_refs text[] nullable).
+applicability (applicability_type enum, applicability_refs text[] nullable), and
+event likes (events.like_count, events.event_likes).
 
 Revision ID: 0001_combined
 Revises: None
@@ -108,6 +109,7 @@ def upgrade() -> None:
         sa.Column("deactivate_remarks", sa.Text(), nullable=True),
         sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("deactivated_by", sa.String(255), nullable=True),
+        sa.Column("like_count", sa.Integer(), nullable=False, server_default="0"),
         sa.ForeignKeyConstraint(["created_by"], [f"{USERS}.users.staff_id"]),
         sa.ForeignKeyConstraint(["updated_by"], [f"{USERS}.users.staff_id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["replaces_document_id"], [f"{EVENTS}.events.id"], ondelete="SET NULL"),
@@ -168,6 +170,39 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["event_id"], [f"{EVENTS}.events.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+        schema=EVENTS,
+    )
+
+    # ─── Events schema: event_likes ───────────────────────────────────────
+    op.create_table(
+        "event_likes",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("event_id", sa.Integer(), nullable=False),
+        sa.Column("staff_id", sa.String(length=255), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(["event_id"], [f"{EVENTS}.events.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["staff_id"], [f"{USERS}.users.staff_id"]),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("event_id", "staff_id", name="uq_event_likes_event_staff"),
+        schema=EVENTS,
+    )
+    op.create_index(
+        "ix_events_event_likes_event_id",
+        "event_likes",
+        ["event_id"],
+        unique=False,
+        schema=EVENTS,
+    )
+    op.create_index(
+        "ix_events_event_likes_staff_id",
+        "event_likes",
+        ["staff_id"],
+        unique=False,
         schema=EVENTS,
     )
 
@@ -439,6 +474,9 @@ def downgrade() -> None:
     for name in ("bulk_applicability_status", "doc_file_type", "doc_applicability_type", "document_status", "document_type"):
         op.execute(sa.text(f"DROP TYPE IF EXISTS {DOCUMENTS}.{name}"))
 
+    op.drop_index("ix_events_event_likes_staff_id", table_name="event_likes", schema=EVENTS)
+    op.drop_index("ix_events_event_likes_event_id", table_name="event_likes", schema=EVENTS)
+    op.drop_table("event_likes", schema=EVENTS)
     op.drop_table("files", schema=EVENTS)
     op.drop_table("event_revisions", schema=EVENTS)
     op.drop_table("events", schema=EVENTS)

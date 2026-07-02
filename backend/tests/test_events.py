@@ -34,6 +34,21 @@ def _event_payload(
     return data
 
 
+def _image_file_metadata(index: int) -> dict:
+    return {
+        "id": None,
+        "original_filename": f"img-{index}.jpg",
+        "blob_path": f"events/test/img-{index}.jpg",
+        "file_type": "IMAGE",
+        "file_size_bytes": 1024 + index,
+        "caption": f"caption-{index}",
+        "description": f"description-{index}",
+        "thumbnail_blob_path": f"events/test/img-{index}-thumb.jpg",
+        "thumbnail_size_bytes": 256,
+        "sort_order": index,
+    }
+
+
 def test_event_dates_parse_to_columns_and_return_array() -> None:
     """Event date storage uses start/end columns while preserving FE array format."""
     event = Event()
@@ -370,6 +385,74 @@ def test_list_events_includes_card_fields(client: TestClient) -> None:
         assert "liked_by_me" in item
 
 
+def test_list_events_filters_employee_applicability_by_email(client: TestClient) -> None:
+    """ACTIVE employee-only events are listed only when the current user's email is in refs."""
+    visible_name = _uniq("Employee Visibility Visible")
+    hidden_name = _uniq("Employee Visibility Hidden")
+
+    visible_payload = _event_payload(
+        event_name=visible_name,
+        status=EventStatus.ACTIVE,
+        change_remarks="publish",
+        applicability_type="EMPLOYEE",
+        applicability_refs=["admin@eventflow.com"],
+    )
+    hidden_payload = _event_payload(
+        event_name=hidden_name,
+        status=EventStatus.ACTIVE,
+        change_remarks="publish",
+        applicability_type="EMPLOYEE",
+        applicability_refs=["someone.else@example.com"],
+    )
+
+    visible_create = client.post("/api/events/", json=visible_payload)
+    hidden_create = client.post("/api/events/", json=hidden_payload)
+    assert visible_create.status_code == 201
+    assert hidden_create.status_code == 201
+    visible_id = visible_create.json()["data"]["id"]
+    hidden_id = hidden_create.json()["data"]["id"]
+
+    resp = client.get(
+        "/api/events/",
+        params={"page": 1, "page_size": 50, "search": "Employee Visibility"},
+    )
+    assert resp.status_code == 200
+    ids = [item["id"] for item in resp.json().get("data", [])]
+    assert visible_id in ids
+    assert hidden_id not in ids
+
+
+def test_list_events_preview_limit_and_event_detail_returns_all_files(client: TestClient) -> None:
+    """List returns 6 preview images; /api/events/event/{id} returns full media for load-more."""
+    event_name = _uniq("Preview Event")
+    payload = _event_payload(
+        event_name=event_name,
+        status=EventStatus.ACTIVE,
+        change_remarks="publish",
+        file_metadata=[_image_file_metadata(i) for i in range(8)],
+    )
+    create = client.post("/api/events/", json=payload)
+    assert create.status_code == 201
+    event_id = create.json()["data"]["id"]
+
+    list_resp = client.get(
+        "/api/events/",
+        params={"page": 1, "page_size": 20, "search": event_name},
+    )
+    assert list_resp.status_code == 200
+    cards = list_resp.json().get("data", [])
+    card = next((item for item in cards if item["id"] == event_id), None)
+    assert card is not None
+    assert len(card["preview_media"]) == 6
+    assert card["remaining_media_count"] == 2
+
+    detail_resp = client.get(f"/api/events/event/{event_id}")
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()["data"]
+    assert detail["id"] == event_id
+    assert len(detail["files"]) == 8
+
+
 def test_like_active_event(client: TestClient) -> None:
     """POST like increments count for ACTIVE events."""
     payload = _event_payload(
@@ -395,6 +478,37 @@ def test_like_active_event(client: TestClient) -> None:
     unlike = client.delete(f"/api/events/{event_id}/like")
     assert unlike.status_code == 200
     assert unlike.json()["data"]["liked_by_me"] is False
+
+
+def test_like_unlike_idempotent(client: TestClient) -> None:
+    """Repeated like/unlike calls keep a stable count and don't go negative."""
+    payload = _event_payload(
+        event_name=_uniq("Idempotent Like"),
+        status=EventStatus.ACTIVE,
+        change_remarks="publish",
+    )
+    create = client.post("/api/events/", json=payload)
+    assert create.status_code == 201
+    event_id = create.json()["data"]["id"]
+
+    first_like = client.post(f"/api/events/{event_id}/like")
+    assert first_like.status_code == 200
+    first_like_count = first_like.json()["data"]["like_count"]
+
+    second_like = client.post(f"/api/events/{event_id}/like")
+    assert second_like.status_code == 200
+    assert second_like.json()["data"]["like_count"] == first_like_count
+    assert second_like.json()["data"]["liked_by_me"] is True
+
+    first_unlike = client.delete(f"/api/events/{event_id}/like")
+    assert first_unlike.status_code == 200
+    first_unlike_count = first_unlike.json()["data"]["like_count"]
+    assert first_unlike_count == max(0, first_like_count - 1)
+
+    second_unlike = client.delete(f"/api/events/{event_id}/like")
+    assert second_unlike.status_code == 200
+    assert second_unlike.json()["data"]["like_count"] == first_unlike_count
+    assert second_unlike.json()["data"]["liked_by_me"] is False
 
 
 def test_like_draft_event_returns_400(client: TestClient) -> None:
