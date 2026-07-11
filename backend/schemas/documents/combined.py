@@ -1,7 +1,8 @@
-from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
+
+from schemas.common import ISTCalendarDateStrOptional, ISTDateStr, ISTDateStrOptional
 
 
 class CombinedItemOut(BaseModel):
@@ -12,12 +13,12 @@ class CombinedItemOut(BaseModel):
     status: str
     created_by: str
     created_by_name: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: ISTDateStr
+    updated_at: ISTDateStr
     deactivated_by: str | None = None
     deactivated_by_name: str | None = None
-    deactivated_at: datetime | None = None
-    next_review_date: date | None = None
+    deactivated_at: ISTDateStrOptional = None
+    next_review_date: ISTCalendarDateStrOptional = None
     revision: int
     version: Decimal
 
@@ -27,7 +28,7 @@ class ItemRevisionListItemOut(BaseModel):
     id: int
     version: Decimal
     revision_number: int
-    created_at: datetime
+    created_at: ISTDateStr
     change_remarks: str | None = None
     event_id: int | None = None
     document_id: int | None = None

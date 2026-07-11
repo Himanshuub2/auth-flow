@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel, field_validator
@@ -11,6 +11,7 @@ from models.documents.document import (
     document_type_to_label,
 )
 from models.documents.document_file import DocumentFileType
+from schemas.common import ISTCalendarDateStrOptional, ISTDateStr, ISTDateStrOptional
 
 
 class DocumentSavePayload(BaseModel):
@@ -105,7 +106,7 @@ class DocumentOut(BaseModel):
     legislation_name: str | None = None
     sub_legislation_id: int | None
     sub_legislation_name: str | None = None
-    next_review_date: date | None
+    next_review_date: ISTCalendarDateStrOptional
     download_allowed: bool
     applicability_type: ApplicabilityType
     applicability_refs: list[str] | None
@@ -115,13 +116,13 @@ class DocumentOut(BaseModel):
     change_remarks: str | None
     deactivate_remarks: str | None
     deactivated_by: str | None = None
-    deactivated_at: datetime | None
+    deactivated_at: ISTDateStrOptional
     replaces_document_id: int | None = None
     created_by: str
     created_by_name: str
     updated_by: str | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: ISTDateStr
+    updated_at: ISTDateStr
     files: list[DocumentFileSummary]
     linked_document_details: list[LinkedDocumentDetail] | None = None
 
@@ -146,10 +147,10 @@ class DocumentRevisionOut(BaseModel):
     change_remarks: str | None = None
     deactivate_remarks: str | None = None
     status: str
-    updated_at: datetime
+    updated_at: ISTDateStr
     created_by: str
     created_by_name: str
-    created_at: datetime
+    created_at: ISTDateStr
 
     model_config = {"from_attributes": True}
 
@@ -159,7 +160,7 @@ class RevisionListItemOut(BaseModel):
     document_id: int
     version: Decimal
     revision_number: int
-    created_at: datetime
+    created_at: ISTDateStr
 
 
 class DocumentRevisionDetailOut(BaseModel):

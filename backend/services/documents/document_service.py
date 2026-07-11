@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections import defaultdict
@@ -8,6 +9,7 @@ from sqlalchemy import (
     String as SAString,
     case,
     cast,
+    delete,
     func,
     literal,
     literal_column,
@@ -15,6 +17,7 @@ from sqlalchemy import (
     or_,
     select,
     union_all,
+    update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,8 +53,10 @@ from services.documents.document_file_service import (
     upload_document_files,
     validate_file_count,
 )
+from services.documents.faq_service import validate_faq_excel
 from storage import get_storage
 from utils.applicability import validate_applicability_refs
+from utils.dates import ist_now
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +147,12 @@ async def save_document(
 
     uploaded_ids: list[int] = []
     if files:
+        if payload.document_type == DocumentType.FAQ:
+            for upload in files:
+                file_bytes = await upload.read()
+                await upload.seek(0)
+                await asyncio.to_thread(validate_faq_excel, file_bytes)
+
         # Count files that will survive after this save, then add the new ones.
         if payload.selected_file_ids is not None:
             kept_count = len(set(payload.selected_file_ids))
@@ -170,20 +181,28 @@ async def save_document(
                 existing_staging.append(fid)
         doc.staging_file_ids = existing_staging
 
+    if payload.document_type == DocumentType.FAQ and not files:
+        await _validate_faq_staging_file(db, doc)
+
     staging_files = _get_staging_files(doc)
     if payload.status == DocumentStatus.ACTIVE:
         validate_file_count(len(staging_files))
-        if doc.document_type in SINGLE_ACTIVE_DOCUMENT_TYPES:
-            existing = await _get_active_singleton_document(db, doc.document_type, exclude_id=doc.id)
-            if existing is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Active {doc.document_type.value} already exists",
-                )
 
     if payload.status == DocumentStatus.ACTIVE:
         if doc.replaces_document_id is not None:
             doc = await _publish_draft(db, doc)
+        elif doc.document_type in SINGLE_ACTIVE_DOCUMENT_TYPES:
+            existing = await _get_active_singleton_document(db, doc.document_type, exclude_id=doc.id)
+            if existing is not None:
+                result = await db.execute(
+                    select(Document)
+                    .where(Document.id == existing.id)
+                    .options(selectinload(Document.revisions))
+                )
+                existing = result.scalar_one()
+                doc = await _absorb_and_publish(db, doc, existing)
+            else:
+                await _publish_document(db, doc)
         else:
             await _publish_document(db, doc)
     else:
@@ -430,7 +449,7 @@ async def toggle_document_status(
             )
         doc.status = DocumentStatus.INACTIVE
         doc.deactivate_remarks = deactivate_remarks.strip()
-        doc.deactivated_at = func.now()
+        doc.deactivated_at = ist_now()
         doc.deactivated_by = user.id if user else None
     elif doc.status == DocumentStatus.INACTIVE:
         await _validate_active_document_name_uniqueness(
@@ -934,7 +953,7 @@ async def get_document_hub(
     if applicability is not None:
         applicability = applicability.strip() or None
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=HUB_NEW_DAYS)
+    cutoff = ist_now() - timedelta(days=HUB_NEW_DAYS)
     mode_load_more = load_more_type is not None and load_more_page is not None
 
     if mode_load_more:
@@ -1437,54 +1456,101 @@ async def _publish_draft(db: AsyncSession, draft: Document) -> Document:
     parent = result.scalar_one_or_none()
     if not parent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent document not found")
+    return await _absorb_and_publish(db, draft, parent)
 
+
+async def _absorb_and_publish(db: AsyncSession, successor: Document, parent: Document) -> Document:
+    """Move parent revisions/files onto successor, publish, and delete parent."""
     last_rev = _find_latest_revision(parent)
     any_changes = True
     if last_rev:
-        metadata_changed = _metadata_changed_vs_revision(draft, last_rev)
-        files_changed = await _staging_files_differ_from_revision(db, draft, last_rev)
+        metadata_changed = _metadata_changed_vs_revision(successor, last_rev)
+        files_changed = await _staging_files_differ_from_revision(db, successor, last_rev)
         any_changes = metadata_changed or files_changed
 
     if any_changes:
-        draft.revision = parent.revision + 1
+        successor.revision = parent.revision + 1
     else:
-        draft.revision = parent.revision
+        successor.revision = parent.revision
 
-    published_file_ids = list(draft.staging_file_ids or [])
+    published_file_ids = list(successor.staging_file_ids or [])
 
-    for rev in parent.revisions:
-        rev.document_id = draft.id
-
-    parent_files = await _get_all_files(db, parent.id)
-    for f in parent_files:
-        f.document_id = draft.id
+    await asyncio.gather(
+        db.execute(
+            update(DocumentRevision)
+            .where(DocumentRevision.document_id == parent.id)
+            .values(document_id=successor.id)
+        ),
+        db.execute(
+            update(DocumentFile)
+            .where(DocumentFile.document_id == parent.id)
+            .values(document_id=successor.id)
+        ),
+    )
+    await db.flush()
 
     if any_changes:
         db.add(DocumentRevision(
-            document_id=draft.id,
-            media_version=1,
-            revision_number=draft.revision,
-            name=draft.name,
-            document_type=draft.document_type,
-            tags=draft.tags,
-            summary=draft.summary,
-            applicability_type=draft.applicability_type,
-            applicability_refs=draft.applicability_refs,
+            document_id=successor.id,
+            media_version=successor.version,
+            revision_number=successor.revision,
+            name=successor.name,
+            document_type=successor.document_type,
+            tags=successor.tags,
+            summary=successor.summary,
+            applicability_type=successor.applicability_type,
+            applicability_refs=successor.applicability_refs,
             file_ids=published_file_ids,
-            created_by=draft.created_by,
+            created_by=successor.created_by,
         ))
     elif last_rev is not None:
+        last_rev.document_id = successor.id
         last_rev.file_ids = list(published_file_ids)
 
-    parent.status = DocumentStatus.INACTIVE
-    draft.status = DocumentStatus.ACTIVE
-    draft.replaces_document_id = None
-    draft.staging_file_ids = []
+    successor.status = DocumentStatus.ACTIVE
+    successor.replaces_document_id = None
+    successor.staging_file_ids = []
 
+    await db.execute(delete(Document).where(Document.id == parent.id))
+    db.expunge(parent)
     await db.flush()
-    await db.refresh(draft)
-    await _sync_document_metadata(db, parent)
-    return draft
+    await db.refresh(successor)
+    return successor
+
+
+async def _validate_faq_staging_file(db: AsyncSession, doc: Document) -> None:
+    """Validate the FAQ xlsx currently in staging."""
+    staging_ids = _get_staging_files(doc)
+    if not staging_ids:
+        return
+
+    all_files = await _get_all_files(db, doc.id)
+    file_by_id = {f.id: f for f in all_files}
+    faq_file = file_by_id.get(staging_ids[0])
+    if faq_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="FAQ file not found",
+        )
+
+    storage = get_storage()
+    blob_path = storage.get_blob_path(faq_file.file_url)
+    if not blob_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="FAQ file not found",
+        )
+
+    try:
+        file_bytes = await storage.read_bytes(blob_path)
+    except OSError as exc:
+        logger.warning("FAQ staging file read failed for %s: %s", blob_path, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="FAQ file could not be read",
+        ) from exc
+
+    await asyncio.to_thread(validate_faq_excel, file_bytes)
 
 
 

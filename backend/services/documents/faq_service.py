@@ -29,6 +29,11 @@ FAQ_CACHE_TTL_SECONDS = 2 * 24 * 60 * 60  # 2 days
 REQUIRED_HEADERS = ("section", "question", "response")
 
 
+class FaqParseError(Exception):
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+
 def _normalize_header(value: object | None) -> str:
     if value is None:
         return ""
@@ -36,54 +41,39 @@ def _normalize_header(value: object | None) -> str:
 
 
 def _header_indices(header_row: tuple) -> tuple[int, int, int]:
-    """Map Section / Question / Response columns; raise 404 if any are missing."""
+    """Map Section / Question / Response columns; raise FaqParseError if any are missing."""
     headers = [_normalize_header(cell) for cell in header_row]
     indices: dict[str, int] = {}
     for name in REQUIRED_HEADERS:
         try:
             indices[name] = headers.index(name)
         except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=(
-                    f"FAQ file is missing required column '{name.title()}'. "
-                    "Expected headers: Section, Question, Response"
-                ),
+            raise FaqParseError(
+                f"FAQ file is missing required column '{name.title()}'. "
+                "Expected headers: Section, Question, Response"
             )
     return indices["section"], indices["question"], indices["response"]
 
 
-def _parse_faq_excel(file_bytes: bytes) -> dict[str, dict[str, str]]:
+def _parse_faq_excel_bytes(file_bytes: bytes) -> dict[str, dict[str, str]]:
     """Parse FAQ xlsx bytes into {section: {question: response}}."""
     if not file_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="FAQ file not found or is empty",
-        )
+        raise FaqParseError("FAQ file is empty")
 
     try:
         wb = load_workbook(filename=io.BytesIO(file_bytes), read_only=True, data_only=True)
     except (InvalidFileException, OSError, ValueError) as exc:
         logger.warning("FAQ workbook could not be read: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="FAQ file not found or could not be read",
-        ) from exc
+        raise FaqParseError("FAQ file could not be read; expected a valid .xlsx workbook") from exc
 
     try:
         ws = wb.active
         if ws is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="FAQ file has no worksheet",
-            )
+            raise FaqParseError("FAQ file has no worksheet")
 
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
         if not header_row:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="FAQ file is missing header row",
-            )
+            raise FaqParseError("FAQ file is missing header row")
 
         section_idx, question_idx, response_idx = _header_indices(header_row)
         max_col = max(section_idx, question_idx, response_idx)
@@ -101,13 +91,38 @@ def _parse_faq_excel(file_bytes: bytes) -> dict[str, dict[str, str]]:
             result.setdefault(section_str, {})[question_str] = response_str
 
         if not result:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="FAQ file has no valid question and answer rows",
-            )
+            raise FaqParseError("FAQ file has no valid question and answer rows")
         return result
     finally:
         wb.close()
+
+
+def validate_faq_excel(file_bytes: bytes) -> None:
+    """Validate FAQ xlsx content; raises HTTP 400 on failure."""
+    try:
+        _parse_faq_excel_bytes(file_bytes)
+    except FaqParseError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
+
+
+def _parse_faq_excel(file_bytes: bytes) -> dict[str, dict[str, str]]:
+    """Parse FAQ xlsx bytes; raises HTTP 404 on failure (public FAQ endpoint)."""
+    try:
+        return _parse_faq_excel_bytes(file_bytes)
+    except FaqParseError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message) from exc
+
+
+def _sort_faq_data(faq_data: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """Sort FAQ sections and questions alphabetically."""
+    sorted_sections: dict[str, dict[str, str]] = {}
+    for section in sorted(faq_data.keys(), key=str.casefold):
+        questions = faq_data.get(section, {})
+        sorted_sections[section] = {
+            question: questions[question]
+            for question in sorted(questions.keys(), key=str.casefold)
+        }
+    return sorted_sections
 
 
 async def get_faq_data(db: AsyncSession) -> dict[str, dict[str, str]]:
@@ -115,7 +130,7 @@ async def get_faq_data(db: AsyncSession) -> dict[str, dict[str, str]]:
     key = cache_keys.faq_data()
     cached = await cache_get(key)
     if cached is not None:
-        return cached
+        return _sort_faq_data(cached)
 
     stmt = (
         select(DocumentFile.file_url)
@@ -145,6 +160,7 @@ async def get_faq_data(db: AsyncSession) -> dict[str, dict[str, str]]:
         ) from exc
 
     faq_data = await asyncio.to_thread(_parse_faq_excel, file_bytes)
+    faq_data = _sort_faq_data(faq_data)
 
     await cache_set(key, faq_data, ttl=FAQ_CACHE_TTL_SECONDS)
     return faq_data

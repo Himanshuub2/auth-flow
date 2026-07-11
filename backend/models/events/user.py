@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, false, func
+from sqlalchemy import Boolean, DateTime, String, false
+from utils.dates import ist_now
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import BaseUsers
@@ -26,6 +27,6 @@ class User(BaseUsers):
     is_policy_hub_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     is_knowledge_hub_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ist_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ist_now, onupdate=ist_now)
     updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)

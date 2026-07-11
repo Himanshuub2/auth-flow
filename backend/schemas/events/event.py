@@ -1,10 +1,10 @@
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, field_validator, model_validator
 
 from models.events.event import ApplicabilityType, EventStatus
 from models.events.event_media_item import FileType
+from schemas.common import ISTDateStr, ISTDateStrOptional
 from utils.dates import format_event_date_range, parse_event_date_range
 
 
@@ -126,12 +126,12 @@ class EventOut(BaseModel):
     created_by: str
     created_by_name: str
     updated_by: str | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: ISTDateStr
+    updated_at: ISTDateStr
     change_remarks: str | None = None
     deactivate_remarks: str | None = None
     deactivated_by: str | None = None
-    deactivated_at: datetime | None = None
+    deactivated_at: ISTDateStrOptional = None
     like_count: int = 0
     liked_by_me: bool = False
     files: list[MediaFileSummary]
@@ -152,10 +152,10 @@ class RevisionOut(BaseModel):
     change_remarks: str | None = None
     deactivate_remarks: str | None = None
     status: str
-    updated_at: datetime
+    updated_at: ISTDateStr
     created_by: str
     created_by_name: str
-    created_at: datetime
+    created_at: ISTDateStr
 
     model_config = {"from_attributes": True}
 
@@ -168,4 +168,4 @@ class RevisionListItemOut(BaseModel):
     version: Decimal
     revision_number: int
     change_remarks: str | None = None
-    created_at: datetime
+    created_at: ISTDateStr

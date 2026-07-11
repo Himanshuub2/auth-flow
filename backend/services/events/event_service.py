@@ -19,6 +19,7 @@ from schemas.events.event import (
 )
 from storage import get_storage
 from utils.applicability import validate_applicability_refs
+from utils.dates import ist_now
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +410,7 @@ async def toggle_event_status(
             )
         event.status = EventStatus.INACTIVE
         event.deactivate_remarks = deactivate_remarks.strip()
-        event.deactivated_at = func.now()
+        event.deactivated_at = ist_now()
         event.deactivated_by = deactivated_by
     elif event.status == EventStatus.INACTIVE:
         await _validate_active_event_name_uniqueness(

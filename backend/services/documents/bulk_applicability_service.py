@@ -17,7 +17,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import bindparam, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from utils.dates import format_date_dmy_month_abbr
+from utils.dates import format_date_dmy_month_abbr, ist_now
 from models.documents.bulk_applicability import (
     BulkApplicabilityRequest,
     BulkApplicabilityStatus,
@@ -942,7 +942,7 @@ async def _batch_update_documents(
     # Core Table update (not ORM entity) so executemany + bindparam works without
     # SQLAlchemy's "bulk UPDATE by primary key" parameter naming rules.
     tbl = Document.__table__
-    now = datetime.now(timezone.utc)
+    now = ist_now()
     stmt = (
         update(tbl)
         .where(tbl.c.id == bindparam("doc_id"))
@@ -976,7 +976,7 @@ async def _batch_update_events(
     user_id: str,
 ) -> None:
     tbl = Event.__table__
-    now = datetime.now(timezone.utc)
+    now = ist_now()
     stmt = (
         update(tbl)
         .where(tbl.c.id == bindparam("evt_id"))

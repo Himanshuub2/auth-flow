@@ -1,11 +1,25 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Union
 
 MONTH_ABBR: tuple[str, ...] = ("", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
 DateInput = Union[datetime, date, str, int, float]
+
+
+def ist_now() -> datetime:
+    """Current time in IST for DB inserts and updates."""
+    return datetime.now(IST)
+
+
+def to_ist(value: datetime) -> datetime:
+    """Convert an aware or naive UTC datetime to IST."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(IST)
 
 
 def parse_date_dmy_month_abbr(value: str) -> date:
@@ -63,15 +77,16 @@ def format_date_dmy_month_abbr(value: DateInput | None) -> str | None:
     d: date
 
     if isinstance(value, datetime):
-        d = value.date()
+        d = to_ist(value).date()
     elif isinstance(value, date):
         d = value
     elif isinstance(value, (int, float)):
-        d = datetime.fromtimestamp(value).date()
+        d = to_ist(datetime.fromtimestamp(value, tz=timezone.utc)).date()
     elif isinstance(value, str):
         # Try ISO 8601 first
         try:
-            d = datetime.fromisoformat(value).date()
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            d = to_ist(parsed).date() if isinstance(parsed, datetime) else parsed.date()
         except Exception:
             # Fallback to common day/month/year patterns
             from datetime import datetime as _dt

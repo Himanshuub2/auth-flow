@@ -17,6 +17,7 @@ from schemas.documents.combined import CombinedItemOut
 from schemas.documents.items_filter import ItemsListBody
 from schemas.events.comman import APIResponse, APIResponsePaginated
 from services import items_service
+from utils.dates import format_date_dmy_month_abbr
 from utils.security import CurrentUser, get_current_user
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,10 +42,8 @@ XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 
 def _excel_cell_value(value):
-    if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    if isinstance(value, date):
-        return value.strftime("%Y-%m-%d")
+    if isinstance(value, (datetime, date)):
+        return format_date_dmy_month_abbr(value)
     if isinstance(value, Decimal):
         return float(value)
     return value

@@ -2,7 +2,8 @@ import enum
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from utils.dates import ist_now
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -167,9 +168,9 @@ class Document(BaseDocuments):
     updated_by: Mapped[str | None] = mapped_column(
         String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id", ondelete="SET NULL"), nullable=True,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ist_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now,
     )
 
     revisions: Mapped[list["DocumentRevision"]] = relationship(
@@ -219,7 +220,7 @@ class DocumentRevision(BaseDocuments):
     created_by: Mapped[str] = mapped_column(
         String(255), ForeignKey(f"{USERS_SCHEMA}.users.staff_id"), nullable=False,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ist_now)
 
     document: Mapped["Document"] = relationship(back_populates="revisions", lazy="raise")
     creator: Mapped["User"] = relationship(

@@ -1,8 +1,7 @@
-from datetime import datetime
-
 from pydantic import BaseModel
 
 from models.events.event_media_item import FileType
+from schemas.common import ISTDateStr
 
 
 class MediaItemOut(BaseModel):
@@ -19,6 +18,6 @@ class MediaItemOut(BaseModel):
     sort_order: int
     file_size_bytes: int
     original_filename: str
-    created_at: datetime
+    created_at: ISTDateStr
 
     model_config = {"from_attributes": True}

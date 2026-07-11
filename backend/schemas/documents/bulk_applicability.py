@@ -1,10 +1,10 @@
 import enum
-from datetime import datetime
 
 from pydantic import BaseModel, field_validator, model_validator
 
 from models.documents.bulk_applicability import BulkApplicabilityStatus
 from models.documents.document import DocumentType
+from schemas.common import ISTDateStr
 
 ALLOWED_TEMPLATE_TYPES: set[str] = {t.value for t in DocumentType} | {"EVENTS"}
 
@@ -63,7 +63,7 @@ class DownloadTemplateRequest(BaseModel):
 class BulkApplicabilityHistoryItem(BaseModel):
     id: int
     updated_by: str
-    updated_on: datetime
+    updated_on: ISTDateStr
     status: BulkApplicabilityStatus
     file_name: str
     file_sas_url: str | None = None
