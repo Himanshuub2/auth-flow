@@ -57,6 +57,7 @@ from services.documents.faq_service import validate_faq_excel
 from storage import get_storage
 from utils.applicability import validate_applicability_refs
 from utils.dates import ist_now
+from utils.users import format_user_owner
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,9 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         select(
             Document,
             User.username.label("created_by_name"),
+            User.organization_vertical.label("creator_org_vertical"),
+            User.division_cluster.label("creator_division_cluster"),
+            User.department.label("creator_department"),
             updater.username.label("updated_by_name"),
             deactivator.username.label("deactivated_by_name"),
         )
@@ -256,7 +260,9 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
     one = row.one_or_none()
     if not one:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    doc, created_by_name, updated_by_name, deactivated_by_name = one[0], one[1], one[2], one[3]
+    doc, created_by_name, creator_org_vertical, creator_division_cluster, creator_department, updated_by_name, deactivated_by_name = (
+        one[0], one[1], one[2], one[3], one[4], one[5], one[6]
+    )
 
     file_ids = _get_current_file_ids_sync(doc)
     file_by_id = {f.id: f for f in doc.files}
@@ -316,6 +322,9 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         replaces_document_id=doc.replaces_document_id,
         created_by=doc.created_by,
         created_by_name=created_by_name,
+        owner=format_user_owner(
+            creator_org_vertical, creator_division_cluster, creator_department
+        ),
         updated_by=updated_by_display,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
@@ -1140,6 +1149,11 @@ def build_document_out(
         replaces_document_id=doc.replaces_document_id,
         created_by=doc.created_by,
         created_by_name=doc.creator.username,
+        owner=format_user_owner(
+            doc.creator.organization_vertical,
+            doc.creator.division_cluster,
+            doc.creator.department,
+        ),
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         files=files,

@@ -28,6 +28,7 @@ from schemas.documents.combined import CombinedItemOut, ItemRevisionListItemOut
 from schemas.documents.items_filter import ItemsKpiOut
 from schemas.documents.document import DocumentOut, DocumentFileSummary, LinkedDocumentDetail
 from schemas.events.event import EventOut, MediaFileSummary
+from utils.users import format_user_owner
 from services.documents import document_service
 from services.events import event_service, revision_service
 from storage import get_storage
@@ -134,11 +135,24 @@ async def list_combined(
 
     creator_ids = {r.created_by for r in rows} | {r.deactivated_by for r in rows if r.deactivated_by is not None}
     name_map: dict[str, str] = {}
+    owner_map: dict[str, str | None] = {}
     if creator_ids:
         user_rows = (await db.execute(
-            select(User.staff_id, User.username).where(User.staff_id.in_(creator_ids))
+            select(
+                User.staff_id,
+                User.username,
+                User.organization_vertical,
+                User.division_cluster,
+                User.department,
+            ).where(User.staff_id.in_(creator_ids))
         )).all()
         name_map = {u.staff_id: u.username for u in user_rows}
+        owner_map = {
+            u.staff_id: format_user_owner(
+                u.organization_vertical, u.division_cluster, u.department
+            )
+            for u in user_rows
+        }
 
     data = [
         CombinedItemOut(
@@ -156,6 +170,7 @@ async def list_combined(
             next_review_date=r.next_review_date,
             revision=r.revision,
             version=r.version,
+            owner=owner_map.get(r.created_by),
         )
         for r in rows
     ]
@@ -445,11 +460,24 @@ async def list_combined_filtered(
 
     creator_ids = {r.created_by for r in rows} | {r.deactivated_by for r in rows if r.deactivated_by is not None}
     name_map: dict[str, str] = {}
+    owner_map: dict[str, str | None] = {}
     if creator_ids:
         user_rows = (await db.execute(
-            select(User.staff_id, User.username).where(User.staff_id.in_(creator_ids))
+            select(
+                User.staff_id,
+                User.username,
+                User.organization_vertical,
+                User.division_cluster,
+                User.department,
+            ).where(User.staff_id.in_(creator_ids))
         )).all()
         name_map = {u.staff_id: u.username for u in user_rows}
+        owner_map = {
+            u.staff_id: format_user_owner(
+                u.organization_vertical, u.division_cluster, u.department
+            )
+            for u in user_rows
+        }
 
     data = [
         CombinedItemOut(
@@ -467,6 +495,7 @@ async def list_combined_filtered(
             next_review_date=r.next_review_date,
             revision=r.revision,
             version=r.version,
+            owner=owner_map.get(r.created_by),
         )
         for r in rows
     ]
@@ -585,6 +614,11 @@ async def get_item_revision_snapshot(
             replaces_document_id=event.replaces_document_id,
             created_by=event.created_by,
             created_by_name=revision.creator.username,
+            owner=format_user_owner(
+                revision.creator.organization_vertical,
+                revision.creator.division_cluster,
+                revision.creator.department,
+            ),
             updated_by=event.updated_by,
             created_at=event.created_at,
             updated_at=event.updated_at,
@@ -649,6 +683,11 @@ async def get_item_revision_snapshot(
             replaces_document_id=doc.replaces_document_id,
             created_by=doc.created_by,
             created_by_name=revision.creator.username,
+            owner=format_user_owner(
+                revision.creator.organization_vertical,
+                revision.creator.division_cluster,
+                revision.creator.department,
+            ),
             updated_by=doc.updated_by,
             created_at=doc.created_at,
             updated_at=doc.updated_at,

@@ -20,6 +20,7 @@ from schemas.events.event import (
 from storage import get_storage
 from utils.applicability import validate_applicability_refs
 from utils.dates import ist_now
+from utils.users import format_user_owner
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,9 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         select(
             Event,
             User.username.label("created_by_name"),
+            User.organization_vertical.label("creator_org_vertical"),
+            User.division_cluster.label("creator_division_cluster"),
+            User.department.label("creator_department"),
             updater.username.label("updated_by_name"),
             deactivator.username.label("deactivated_by_name"),
         )
@@ -172,7 +176,9 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
     one = row.one_or_none()
     if not one:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
-    event, created_by_name, updated_by_name, deactivated_by_name = one[0], one[1], one[2], one[3]
+    event, created_by_name, creator_org_vertical, creator_division_cluster, creator_department, updated_by_name, deactivated_by_name = (
+        one[0], one[1], one[2], one[3], one[4], one[5], one[6]
+    )
 
     file_ids = await _get_current_file_ids(db, event)
     all_files = await _get_all_files(db, event_id)
@@ -207,6 +213,9 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         replaces_document_id=event.replaces_document_id,
         created_by=event.created_by,
         created_by_name=created_by_name,
+        owner=format_user_owner(
+            creator_org_vertical, creator_division_cluster, creator_department
+        ),
         updated_by=updated_by_display,
         created_at=event.created_at,
         updated_at=event.updated_at,
@@ -250,6 +259,11 @@ def build_event_out(
         replaces_document_id=event.replaces_document_id,
         created_by=event.created_by,
         created_by_name=event.creator.username,
+        owner=format_user_owner(
+            event.creator.organization_vertical,
+            event.creator.division_cluster,
+            event.creator.department,
+        ),
         created_at=event.created_at,
         updated_at=event.updated_at,
         change_remarks=event.change_remarks,

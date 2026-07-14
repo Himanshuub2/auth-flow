@@ -21,6 +21,7 @@ class CombinedItemOut(BaseModel):
     next_review_date: ISTCalendarDateStrOptional = None
     revision: int
     version: Decimal
+    owner: str | None = None
 
 
 class ItemRevisionListItemOut(BaseModel):

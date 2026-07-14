@@ -135,6 +135,7 @@ class EventOut(BaseModel):
     like_count: int = 0
     liked_by_me: bool = False
     files: list[MediaFileSummary]
+    owner: str | None = None
 
     model_config = {"from_attributes": True}
 

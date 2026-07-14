@@ -125,6 +125,7 @@ class DocumentOut(BaseModel):
     updated_at: ISTDateStr
     files: list[DocumentFileSummary]
     linked_document_details: list[LinkedDocumentDetail] | None = None
+    owner: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -151,7 +152,7 @@ class DocumentRevisionOut(BaseModel):
     created_by: str
     created_by_name: str
     created_at: ISTDateStr
-
+    owner: str | None = None
     model_config = {"from_attributes": True}
 
 
