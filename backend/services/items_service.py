@@ -72,6 +72,19 @@ def _normalize_item_type(item_type: str | None) -> str | None:
     return normalized
 
 
+def _parse_owner_filter(owner: str | None) -> tuple[str, str, str] | None:
+    """Parse owner as vertical/division/department."""
+    if not owner:
+        return None
+    parts = [part.strip() for part in owner.split("/")]
+    if len(parts) != 3 or not all(parts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="owner must be in 'vertical/division/department' format",
+        )
+    return parts[0], parts[1], parts[2]
+
+
 async def list_combined(
     db: AsyncSession,
     page: int = 1,
@@ -308,6 +321,7 @@ async def list_combined_filtered(
     due_for_review: bool | None = None,
     overdue: bool | None = None,
     search: str | None = None,
+    owner: str | None = None,
     cache_result: bool = True,
 ) -> tuple[list[CombinedItemOut], int]:
     """
@@ -344,6 +358,7 @@ async def list_combined_filtered(
         due_for_review=due_for_review,
         overdue=overdue,
         search=search,
+        owner=owner,
     )
     if cache_result:
         cached = await cache_get(cache_key)
@@ -351,6 +366,18 @@ async def list_combined_filtered(
             return [CombinedItemOut.model_validate(item) for item in cached["data"]], cached["total"]
 
     doc_enum_list, include_events = _resolve_document_types(document_types)
+    owner_parts = _parse_owner_filter(owner)
+    owner_staff_ids: set[str] | None = None
+    if owner_parts is not None:
+        vertical, division, department = owner_parts
+        owner_rows = (await db.execute(
+            select(User.staff_id).where(
+                func.lower(User.organization_vertical) == vertical.lower(),
+                func.lower(User.division_cluster) == division.lower(),
+                func.lower(User.department) == department.lower(),
+            )
+        )).all()
+        owner_staff_ids = {row.staff_id for row in owner_rows}
 
     event_q = (
         select(
@@ -360,6 +387,7 @@ async def list_combined_filtered(
             literal(None).label("document_type"),
             Event.status.cast(String).label("status"),
             Event.created_by.label("created_by"),
+            Event.updated_by.label("updated_by"),
             Event.created_at.label("created_at"),
             Event.updated_at.label("updated_at"),
             Event.deactivated_by.label("deactivated_by"),
@@ -390,6 +418,11 @@ async def list_combined_filtered(
             event_q = event_q.where(Event.updated_at <= last_updated_end)
         if search and search.strip():
             event_q = event_q.where(Event.event_name.ilike(f"%{search.strip()}%"))
+        if owner_staff_ids is not None:
+            if owner_staff_ids:
+                event_q = event_q.where(Event.updated_by.in_(owner_staff_ids))
+            else:
+                event_q = event_q.where(literal(False))
 
     doc_q = (
         select(
@@ -399,6 +432,7 @@ async def list_combined_filtered(
             Document.document_type.cast(String).label("document_type"),
             Document.status.cast(String).label("status"),
             Document.created_by.label("created_by"),
+            Document.updated_by.label("updated_by"),
             Document.created_at.label("created_at"),
             Document.updated_at.label("updated_at"),
             Document.deactivated_by.label("deactivated_by"),
@@ -434,6 +468,11 @@ async def list_combined_filtered(
         doc_q = doc_q.where(_document_overdue(today))
     if search and search.strip():
         doc_q = doc_q.where(Document.name.ilike(f"%{search.strip()}%"))
+    if owner_staff_ids is not None:
+        if owner_staff_ids:
+            doc_q = doc_q.where(Document.updated_by.in_(owner_staff_ids))
+        else:
+            doc_q = doc_q.where(literal(False))
 
     if item_type_norm == EVENT:
         combined = event_q.subquery()

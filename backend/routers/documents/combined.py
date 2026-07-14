@@ -111,6 +111,7 @@ async def list_combined(
         due_for_review=payload.due_for_review,
         overdue=payload.overdue,
         search=payload.search,
+        owner=payload.owner,
     )
     logger.info("list_combined total=%s page=%s", total, payload.page)
     return APIResponsePaginated(
@@ -147,6 +148,7 @@ async def export_combined(
         due_for_review=payload.due_for_review,
         overdue=payload.overdue,
         search=payload.search,
+        owner=payload.owner,
         cache_result=False,
     )
     data, _ = await items_service.list_combined_filtered(
@@ -164,6 +166,7 @@ async def export_combined(
         due_for_review=payload.due_for_review,
         overdue=payload.overdue,
         search=payload.search,
+        owner=payload.owner,
         cache_result=False,
     )
     logger.info("export_combined total=%s", total)

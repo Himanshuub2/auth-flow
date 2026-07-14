@@ -64,6 +64,7 @@ def items_list(
     due_for_review: bool | None,
     overdue: bool | None,
     search: str | None,
+    owner: str | None,
 ) -> str:
     return (
         "items:list:"
@@ -73,5 +74,6 @@ def items_list(
         f"{','.join(sorted(statuses or []))}:"
         f"{last_updated_start}:{last_updated_end}:{next_review_start}:{next_review_end}:"
         f"due{int(bool(due_for_review))}:ov{int(bool(overdue))}:"
-        f"{(search or '').strip().lower()}"
+        f"{(search or '').strip().lower()}:"
+        f"{(owner or '').strip().upper()}"
     )
