@@ -29,15 +29,23 @@ class DocumentType(str, enum.Enum):
 
 DOCUMENT_TYPE_LABELS: dict[DocumentType, str] = {
     DocumentType.POLICY: "Policy",
-    DocumentType.GUIDANCE_NOTE: "Guidance Note",
-    DocumentType.LAW_REGULATION: "Law Regulation",
-    DocumentType.TRAINING_MATERIAL: "Training Material",
-    DocumentType.EWS: "EWS",
+    DocumentType.GUIDANCE_NOTE: "Guidance Notes",
+    DocumentType.LAW_REGULATION: "Law & Regulation",
+    DocumentType.TRAINING_MATERIAL: "Training Resources",
+    DocumentType.EWS: "Early Warnings",
     DocumentType.FAQ: "FAQ",
     DocumentType.LATEST_NEWS_AND_ANNOUNCEMENTS: "Latest News and Announcements",
-    DocumentType.FLYER: "Flyer",
+    DocumentType.FLYER: "Flyers",
 }
-LABEL_TO_DOCUMENT_TYPE: dict[str, DocumentType] = {v: k for k, v in DOCUMENT_TYPE_LABELS.items()}
+LABEL_TO_DOCUMENT_TYPE: dict[str, DocumentType] = {
+    **{v: k for k, v in DOCUMENT_TYPE_LABELS.items()},
+    # Legacy labels still accepted on input.
+    "Guidance Note": DocumentType.GUIDANCE_NOTE,
+    "Law Regulation": DocumentType.LAW_REGULATION,
+    "Training Material": DocumentType.TRAINING_MATERIAL,
+    "EWS": DocumentType.EWS,
+    "Flyer": DocumentType.FLYER,
+}
 
 
 def document_type_to_label(value: str | None) -> str | None:

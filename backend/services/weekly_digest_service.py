@@ -12,13 +12,13 @@ from utils.dates import IST
 
 DOCUMENT_TYPE_LABELS: dict[str, str] = {
     "POLICY": "Policy",
-    "GUIDANCE_NOTE": "Guidance Note",
-    "LAW_REGULATION": "Law Regulation",
-    "TRAINING_MATERIAL": "Training Material",
-    "EWS": "EWS",
+    "GUIDANCE_NOTE": "Guidance Notes",
+    "LAW_REGULATION": "Law & Regulation",
+    "TRAINING_MATERIAL": "Training Resources",
+    "EWS": "Early Warnings",
     "FAQ": "FAQ",
     "LATEST_NEWS_AND_ANNOUNCEMENTS": "Latest News and Announcements",
-    "FLYER": "Flyer",
+    "FLYER": "Flyers",
 }
 
 ALLOWED_WEEKLY_DOCUMENT_TYPES = {"FLYER", "POLICY", "TRAINING_MATERIAL"}
@@ -338,16 +338,23 @@ def build_and_send_weekly_digest_sync(
     reference_utc: datetime | None = None,
     cc_addresses: list[str] | None = None,
     bcc_addresses: list[str] | None = None,
+    use_sample_data: bool = True,
 ) -> dict[str, Any]:
     """
     Build weekly digest payload + HTML, then send via ACS (sync flow).
+
+    Set use_sample_data=False to render real DB payload instead of demo cards.
     """
     payload = build_weekly_digest_payload_sync(
         db_config,
         reference_utc=reference_utc,
         base_url=base_url,
     )
-    html = build_weekly_digest_html(payload, banner_image_url=banner_image_url)
+    html = build_weekly_digest_html(
+        payload,
+        banner_image_url=banner_image_url,
+        use_sample_data=use_sample_data,
+    )
     send_result = send_html_email_via_acs(
         connection_string=connection_string,
         sender_address=sender_address,
@@ -357,9 +364,8 @@ def build_and_send_weekly_digest_sync(
         subject=subject,
         html_content=html,
         plain_text=(
-            f"Weekly digest for {payload['period']['label']}. "
-            f"Knowledge Hub updates: {payload['counts']['knowledge_hub']}, "
-            f"Events updates: {payload['counts']['events']}."
+            "Weekly Knowledge Hub and Events digest is available. "
+            "Please review the latest highlights."
         ),
     )
     return {
@@ -381,9 +387,12 @@ async def build_and_send_weekly_digest(
     reference_utc: datetime | None = None,
     cc_addresses: list[str] | None = None,
     bcc_addresses: list[str] | None = None,
+    use_sample_data: bool = True,
 ) -> dict[str, Any]:
     """
     Async wrapper for sync build+send flow using ThreadPoolExecutor(max_workers=10).
+
+    Set use_sample_data=False to render real DB payload instead of demo cards.
     """
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -399,45 +408,65 @@ async def build_and_send_weekly_digest(
             base_url=base_url,
             banner_image_url=banner_image_url,
             reference_utc=reference_utc,
+            use_sample_data=use_sample_data,
         ),
     )
 
 
 def _render_doc_card(item: dict[str, Any]) -> str:
+    # Solid soft blues (Outlook often ignores CSS gradients and shows white).
+    doc_bg = [
+        "#eaf5ff",
+        "#edf2ff",
+        "#e8f8ff",
+        "#f0f4ff",
+        "#e6f4ff",
+    ]
     tags = item.get("tags") or []
+    card_index = int(item.get("_index", 0)) % len(doc_bg)
+    bg = doc_bg[card_index]
     tag_html = "".join(
-        f"<span style=\"display:inline-block;background:#e6f0ff;color:#0f3f7a;"
+        f"<span style=\"display:inline-block;background:#ffffff;color:#0f3f7a;"
         f"font-size:12px;line-height:16px;padding:4px 8px;border-radius:999px;"
         f"margin:0 6px 6px 0;\">{escape(str(tag))}</span>"
         for tag in tags
     )
     return (
         "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-        "style=\"border-collapse:separate;border-spacing:0;background:#ffffff;border:1px solid #d9e7ff;"
-        "border-radius:10px;\">"
+        f"bgcolor=\"{bg}\" style=\"border-collapse:separate;border-spacing:0;background-color:{bg};"
+        "border:1px solid #c5dcff;border-radius:10px;\">"
         "<tr><td style=\"padding:16px;font-family:'Segoe UI',Arial,sans-serif;color:#1a1a1a;\">"
-        f"<div style=\"font-size:12px;font-weight:700;color:#0f4d9a;text-transform:uppercase;letter-spacing:.4px;\">{escape(item['heading'])}</div>"
-        f"<div style=\"font-size:16px;line-height:22px;font-weight:700;margin-top:6px;\">{escape(item['name'])}</div>"
-        f"<div style=\"font-size:13px;line-height:18px;color:#335f9e;margin-top:6px;\">Type: {escape(item['document_type_label'])}</div>"
-        f"<div style=\"font-size:14px;line-height:21px;color:#2f3a4a;margin-top:8px;\">{escape(item['description'])}</div>"
+        f"<div style=\"font-size:12px;font-weight:700;color:#154f9f;text-transform:uppercase;letter-spacing:.4px;\">{escape(item['heading'])}</div>"
+        f"<div style=\"font-size:16px;line-height:22px;font-weight:700;margin-top:6px;color:#0b2f66;\">{escape(item['name'])}</div>"
+        f"<div style=\"font-size:13px;line-height:18px;color:#235b9f;margin-top:6px;\">Type: {escape(item['document_type_label'])}</div>"
+        f"<div style=\"font-size:14px;line-height:21px;color:#27384f;margin-top:8px;\">{escape(item['description'])}</div>"
         f"<div style=\"margin-top:10px;\">{tag_html}</div>"
-        f"<a href=\"{escape(item['link'])}\" style=\"display:inline-block;margin-top:8px;color:#0b5cab;"
-        "font-size:14px;font-weight:600;text-decoration:none;\">Open document</a>"
+        f"<a href=\"{escape(item['link'])}\" style=\"display:inline-block;margin-top:8px;color:#0c4a92;"
+        "font-size:14px;font-weight:700;text-decoration:none;\">Open document</a>"
         "</td></tr></table>"
     )
 
 
 def _render_event_card(item: dict[str, Any]) -> str:
+    event_bg = [
+        "#eef4ff",
+        "#f0efff",
+        "#e9f7ff",
+        "#eef1ff",
+        "#e8f4ff",
+    ]
+    card_index = int(item.get("_index", 0)) % len(event_bg)
+    bg = event_bg[card_index]
     return (
         "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-        "style=\"border-collapse:separate;border-spacing:0;background:#ffffff;border:1px solid #d9e7ff;"
-        "border-radius:10px;\">"
+        f"bgcolor=\"{bg}\" style=\"border-collapse:separate;border-spacing:0;background-color:{bg};"
+        "border:1px solid #c9dfff;border-radius:10px;\">"
         "<tr><td style=\"padding:16px;font-family:'Segoe UI',Arial,sans-serif;color:#1a1a1a;\">"
-        "<div style=\"font-size:12px;font-weight:700;color:#0f4d9a;text-transform:uppercase;letter-spacing:.4px;\">New Event(s) added</div>"
-        f"<div style=\"font-size:16px;line-height:22px;font-weight:700;margin-top:6px;\">{escape(item['name'])}</div>"
-        f"<div style=\"font-size:14px;line-height:21px;color:#2f3a4a;margin-top:8px;\">{escape(item['description'])}</div>"
-        f"<a href=\"{escape(item['link'])}\" style=\"display:inline-block;margin-top:10px;color:#0b5cab;"
-        "font-size:14px;font-weight:600;text-decoration:none;\">Open event</a>"
+        "<div style=\"font-size:12px;font-weight:700;color:#164d9c;text-transform:uppercase;letter-spacing:.4px;\">New Event(s) added</div>"
+        f"<div style=\"font-size:16px;line-height:22px;font-weight:700;margin-top:6px;color:#102e61;\">{escape(item['name'])}</div>"
+        f"<div style=\"font-size:14px;line-height:21px;color:#2b3f5e;margin-top:8px;\">{escape(item['description'])}</div>"
+        f"<a href=\"{escape(item['link'])}\" style=\"display:inline-block;margin-top:10px;color:#0c4a92;"
+        "font-size:14px;font-weight:700;text-decoration:none;\">Open event</a>"
         "</td></tr></table>"
     )
 
@@ -474,15 +503,120 @@ def _render_grid(cards: list[str], empty_message: str) -> str:
     )
 
 
+def _sample_digest_items() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Demo Knowledge Hub + Events cards for HTML preview / local testing."""
+    sample_knowledge_hub = [
+        {
+            "heading": "New flyer available",
+            "name": "Critical Third-Party Cyber Risk Awareness Flyer for Multi-Entity Compliance and Continuous Monitoring Excellence",
+            "document_type_label": "Flyer",
+            "description": "A detailed communication flyer explaining cross-functional due diligence, escalation protocols, and continuous observation requirements for high-risk third-party onboarding and lifecycle governance.",
+            "tags": ["Cyber Risk", "Third Party", "Awareness"],
+            "link": "https://ecp.com/flyer/1001",
+            "_index": 0,
+        },
+        {
+            "heading": "New Policy, Law regulation available",
+            "name": "Enterprise Policy on Data Protection, Consent Governance, and Cross-Border Information Processing Controls",
+            "document_type_label": "Policy",
+            "description": "This policy defines long-form obligations for teams handling personally identifiable data, mandatory retention boundaries, internal approval controls, and legal review checkpoints.",
+            "tags": ["Data Privacy", "Policy", "Governance"],
+            "link": "https://ecp.com/policy/1002",
+            "_index": 1,
+        },
+        {
+            "heading": "New training material available",
+            "name": "Advanced Training Material for Regulatory Reporting Accuracy, Audit Readiness, and Exception Handling Procedures",
+            "document_type_label": "Training Material",
+            "description": "Comprehensive training content covering scenario-based reporting practices, validation workflows, and long-text guidance for correcting filing exceptions without timeline slippage.",
+            "tags": ["Training", "Reporting", "Audit"],
+            "link": "https://ecp.com/training_material/1003",
+            "_index": 2,
+        },
+        {
+            "heading": "New Policy, Law regulation available",
+            "name": "Updated Anti-Bribery and Conflict-of-Interest Policy for Vendor Engagement, Entertainment, and Hospitality Disclosures",
+            "document_type_label": "Policy",
+            "description": "A practical policy update that clarifies declaration thresholds, investigative responsibilities, and periodic attestation requirements across procurement and business support functions.",
+            "tags": ["Ethics", "Policy", "Vendors"],
+            "link": "https://ecp.com/policy/1004",
+            "_index": 3,
+        },
+        {
+            "heading": "New flyer available",
+            "name": "Information Security Incident Reporting Flyer for Rapid Internal Notification and Coordinated Compliance Response",
+            "document_type_label": "Flyer",
+            "description": "An operational flyer that lists immediate reporting channels, evidence preservation reminders, and communication checkpoints to support timely legal and compliance intervention.",
+            "tags": ["Incident", "Security", "Response"],
+            "link": "https://ecp.com/flyer/1005",
+            "_index": 4,
+        },
+    ]
+    sample_events = [
+        {
+            "name": "Compliance Townhall on Emerging Regulatory Trends, Supervisory Expectations, and Cross-Border Governance Preparedness",
+            "description": "A broad leadership session to discuss major regulatory developments, practical controls alignment, and sustained evidence practices for internal and external stakeholder confidence.",
+            "link": "https://ecp.com/events/2001",
+            "_index": 0,
+        },
+        {
+            "name": "Hands-On Workshop for Case Management Documentation Quality and Risk-Based Escalation Decisioning",
+            "description": "Interactive workshop focused on drafting robust case narratives, documenting rationale clearly, and improving escalation quality for complex multi-factor incidents.",
+            "link": "https://ecp.com/events/2002",
+            "_index": 1,
+        },
+        {
+            "name": "Training Session on Investigative Interview Standards, Evidence Integrity, and Defensible Closure Reporting",
+            "description": "A scenario-rich program that provides practical methods for interview preparation, evidence chain handling, and producing closure reports that withstand review.",
+            "link": "https://ecp.com/events/2003",
+            "_index": 2,
+        },
+        {
+            "name": "Panel Discussion on Internal Controls Optimization, Policy Usability, and Department-Wide Adoption Strategy",
+            "description": "Cross-team discussion around balancing control strength with operational usability, including examples of successful rollout playbooks and accountability models.",
+            "link": "https://ecp.com/events/2004",
+            "_index": 3,
+        },
+        {
+            "name": "Knowledge Sharing Forum for Lessons Learned from Recent Audit Observations and Corrective Action Execution",
+            "description": "An extended knowledge forum to review recurring audit findings, strong remediation approaches, and methods to prevent repeat observations through durable ownership.",
+            "link": "https://ecp.com/events/2005",
+            "_index": 4,
+        },
+    ]
+    return sample_knowledge_hub, sample_events
+
+
+def _with_card_index(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach gradient index for card styling without mutating original rows."""
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(items):
+        row = dict(item)
+        row["_index"] = idx
+        out.append(row)
+    return out
+
+
 def build_weekly_digest_html(
     payload: dict[str, Any],
     *,
     banner_image_url: str | None = None,
+    use_sample_data: bool = True,
 ) -> str:
-    knowledge_cards = [_render_doc_card(item) for item in payload.get("knowledge_hub", [])]
-    event_cards = [_render_event_card(item) for item in payload.get("events", [])]
-    counts = payload.get("counts", {})
-    period = payload.get("period", {})
+    """
+    Build Outlook-safe HTML digest.
+
+    use_sample_data=True  -> demo cards (preview / local test)
+    use_sample_data=False -> real payload from DB
+    """
+    if use_sample_data:
+        knowledge_hub, events = _sample_digest_items()
+    else:
+        knowledge_hub = _with_card_index(list(payload.get("knowledge_hub") or []))
+        events = _with_card_index(list(payload.get("events") or []))
+
+    knowledge_cards = [_render_doc_card(item) for item in knowledge_hub]
+    event_cards = [_render_event_card(item) for item in events]
 
     if banner_image_url:
         banner_html = (
@@ -490,14 +624,36 @@ def build_weekly_digest_html(
             "style=\"display:block;width:100%;max-width:640px;height:auto;border:0;\">"
         )
     else:
+        # Solid color bands so Outlook shows color (CSS gradients often render white).
         banner_html = (
             "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-            "style=\"border-collapse:collapse;background:linear-gradient(90deg,#084a9a 0%,#0b5cab 35%,#2a80d8 70%,#71b2ff 100%);\">"
-            "<tr><td style=\"padding:28px 24px;font-family:'Segoe UI',Arial,sans-serif;color:#ffffff;\">"
-            "<div style=\"font-size:24px;line-height:30px;font-weight:700;\">Weekly Knowledge & Events Digest</div>"
-            f"<div style=\"font-size:14px;line-height:20px;margin-top:8px;opacity:.95;\">{escape(period.get('label', 'Last week update'))}</div>"
-            "</td></tr></table>"
+            "style=\"border-collapse:collapse;\">"
+            "<tr><td bgcolor=\"#0a4d96\" height=\"8\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
+            "<tr>"
+            "<td bgcolor=\"#1565c0\" style=\"padding:26px 24px;font-family:'Segoe UI',Arial,sans-serif;color:#ffffff;\">"
+            "<div style=\"font-size:22px;line-height:28px;font-weight:700;\">Weekly Knowledge &amp; Events Digest</div>"
+            "<div style=\"font-size:14px;line-height:20px;margin-top:6px;color:#d6e8ff;\">"
+            "Highlights from Knowledge Hub and Events"
+            "</div>"
+            "</td>"
+            "</tr>"
+            "<tr><td bgcolor=\"#42a5f5\" height=\"6\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
+            "</table>"
         )
+
+    footer_html = (
+        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
+        "style=\"border-collapse:collapse;\">"
+        "<tr><td bgcolor=\"#42a5f5\" height=\"4\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
+        "<tr>"
+        "<td bgcolor=\"#0d47a1\" style=\"padding:22px 24px;font-family:'Segoe UI',Arial,sans-serif;color:#ffffff;\">"
+        "<div style=\"font-size:14px;line-height:20px;\">Regards,</div>"
+        "<div style=\"font-size:15px;line-height:22px;font-weight:700;margin-top:2px;\">Compliance Team</div>"
+        "</td>"
+        "</tr>"
+        "<tr><td bgcolor=\"#0a4d96\" height=\"8\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
+        "</table>"
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -511,12 +667,7 @@ def build_weekly_digest_html(
       body {{
         margin: 0 !important;
         padding: 0 !important;
-        background: #eef4ff;
-      }}
-      @media (prefers-color-scheme: dark) {{
-        body {{
-          background: #0e1523 !important;
-        }}
+        background-color: #dcecff !important;
       }}
       @media screen and (max-width: 640px) {{
         .container {{
@@ -525,47 +676,45 @@ def build_weekly_digest_html(
       }}
     </style>
   </head>
-  <body>
-    <center style="width:100%;background:#eef4ff;padding:18px 10px;">
-      <table role="presentation" class="container" width="640" cellpadding="0" cellspacing="0"
-             style="width:640px;max-width:640px;border-collapse:collapse;background:#f4f8ff;border-radius:12px;overflow:hidden;">
-        <tr>
-          <td>{banner_html}</td>
-        </tr>
-        <tr>
-          <td style="padding:18px 20px 8px 20px;font-family:'Segoe UI',Arial,sans-serif;color:#16365f;">
-            <div style="font-size:14px;line-height:20px;">
-              Period: <strong>{escape(period.get("label", "Last week"))}</strong>
-            </div>
-            <div style="font-size:13px;line-height:18px;margin-top:4px;color:#245184;">
-              Total updates: <strong>{counts.get("total", 0)}</strong> |
-              Knowledge Hub: <strong>{counts.get("knowledge_hub", 0)}</strong> |
-              Events: <strong>{counts.get("events", 0)}</strong>
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:8px 20px 4px 20px;font-family:'Segoe UI',Arial,sans-serif;">
-            <div style="font-size:20px;line-height:26px;font-weight:700;color:#0d3f7d;">Knowledge Hub</div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:8px 12px 18px 12px;">
-            {_render_grid(knowledge_cards, "No new Knowledge Hub documents were added in the last week.")}
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:2px 20px 4px 20px;font-family:'Segoe UI',Arial,sans-serif;">
-            <div style="font-size:20px;line-height:26px;font-weight:700;color:#0d3f7d;">Events</div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:8px 12px 22px 12px;">
-            {_render_grid(event_cards, "No new events were added in the last week.")}
-          </td>
-        </tr>
-      </table>
-    </center>
+  <body style="margin:0;padding:0;background-color:#dcecff;">
+    <!-- Outer wrap: soft multi-tone background for Outlook + other clients -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+           bgcolor="#dcecff" style="border-collapse:collapse;background-color:#dcecff;">
+      <tr>
+        <td align="center" bgcolor="#e3f0ff" style="padding:20px 10px;background-color:#e3f0ff;">
+          <table role="presentation" class="container" width="640" cellpadding="0" cellspacing="0" border="0"
+                 bgcolor="#f4f8ff"
+                 style="width:640px;max-width:640px;border-collapse:collapse;background-color:#f4f8ff;">
+            <tr>
+              <td>{banner_html}</td>
+            </tr>
+            <tr>
+              <td bgcolor="#eaf3ff" style="padding:18px 20px 6px 20px;font-family:'Segoe UI',Arial,sans-serif;background-color:#eaf3ff;">
+                <div style="font-size:18px;line-height:24px;font-weight:700;color:#0d3f7d;">Knowledge Hub</div>
+              </td>
+            </tr>
+            <tr>
+              <td bgcolor="#f4f8ff" style="padding:8px 12px 16px 12px;background-color:#f4f8ff;">
+                {_render_grid(knowledge_cards, "No Knowledge Hub items to show.")}
+              </td>
+            </tr>
+            <tr>
+              <td bgcolor="#e8f0ff" style="padding:8px 20px 6px 20px;font-family:'Segoe UI',Arial,sans-serif;background-color:#e8f0ff;">
+                <div style="font-size:18px;line-height:24px;font-weight:700;color:#0d3f7d;">Events</div>
+              </td>
+            </tr>
+            <tr>
+              <td bgcolor="#f4f8ff" style="padding:8px 12px 20px 12px;background-color:#f4f8ff;">
+                {_render_grid(event_cards, "No Events to show.")}
+              </td>
+            </tr>
+            <tr>
+              <td>{footer_html}</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>"""
 
@@ -576,11 +725,16 @@ async def build_weekly_digest_email(
     reference_utc: datetime | None = None,
     base_url: str = "https://ecp.com",
     banner_image_url: str | None = None,
+    use_sample_data: bool = True,
 ) -> tuple[dict[str, Any], str]:
     payload = await build_weekly_digest_payload(
         db_config,
         reference_utc=reference_utc,
         base_url=base_url,
     )
-    html = build_weekly_digest_html(payload, banner_image_url=banner_image_url)
+    html = build_weekly_digest_html(
+        payload,
+        banner_image_url=banner_image_url,
+        use_sample_data=use_sample_data,
+    )
     return payload, html
