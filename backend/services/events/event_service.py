@@ -2,7 +2,7 @@ import logging
 from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import Text, cast, func, or_, select
+from sqlalchemy import Text, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
@@ -520,7 +520,31 @@ async def _get_or_create_draft(
         parent_to_draft_id[fid] = new_file.id
 
     draft.staging_file_ids = new_staging_ids
+
+    parent_revisions = (await db.execute(
+        select(EventRevision)
+        .where(EventRevision.event_id == parent.id)
+        .order_by(EventRevision.media_version, EventRevision.revision_number)
+    )).scalars().all()
+    for rev in parent_revisions:
+        draft_file_ids = [parent_to_draft_id.get(fid, fid) for fid in (rev.file_ids or [])]
+        db.add(EventRevision(
+            event_id=draft.id,
+            media_version=rev.media_version,
+            revision_number=rev.revision_number,
+            event_name=rev.event_name,
+            sub_event_name=rev.sub_event_name,
+            event_dates=rev.event_dates,
+            description=rev.description,
+            tags=rev.tags,
+            applicability_type=rev.applicability_type,
+            applicability_refs=rev.applicability_refs,
+            change_remarks=rev.change_remarks,
+            file_ids=draft_file_ids,
+            created_by=rev.created_by,
+        ))
     await db.flush()
+
     return draft, parent_to_draft_id
 
 
@@ -588,6 +612,11 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
 
     published_file_ids = list(draft.staging_file_ids or [])
 
+    await db.execute(
+        delete(EventRevision).where(EventRevision.event_id == draft.id)
+    )
+    await db.flush()
+
     for rev in parent.revisions:
         rev.event_id = draft.id
 
@@ -612,11 +641,12 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
     elif last_rev is not None:
         last_rev.file_ids = list(published_file_ids)
 
-    parent.status = EventStatus.INACTIVE
     draft.status = EventStatus.ACTIVE
     draft.replaces_document_id = None
     draft.staging_file_ids = published_file_ids
 
+    await db.execute(delete(Event).where(Event.id == parent.id))
+    db.expunge(parent)
     await db.flush()
     await db.refresh(draft)
     return draft

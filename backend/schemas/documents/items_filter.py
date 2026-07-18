@@ -29,7 +29,7 @@ class ItemsListBody(BaseModel):
         None,
         description="Documents only: next_review_date < today. List total matches GET /api/items/kpi overdue when no other filters.",
     )
-    search: str | None = Field(None, description="Search in document/event name (ILIKE)")
+    search: str | None = Field(None, description="Search in name (ILIKE); also matches id when numeric")
     owner: str | None = Field(
         None,
         description="Owner filter in 'vertical/division/department' format, e.g. DE/FE/DEX",

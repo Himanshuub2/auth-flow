@@ -7,7 +7,7 @@ import logging
 from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, select, func, union_all, literal, String
+from sqlalchemy import and_, or_, select, func, union_all, literal, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cache import cache_get, cache_set
@@ -331,7 +331,7 @@ async def list_combined_filtered(
     statuses: filter by status (DRAFT, ACTIVE, INACTIVE).
     due_for_review / overdue: documents with next_review_date set only; events excluded.
     item_type omitted: return both events and documents unless due_for_review/overdue is set.
-    search: ILIKE on document/event name (applied in same API).
+    search: ILIKE on document/event name; also matches id when search is an integer.
     """
     item_type_norm = _normalize_item_type(item_type)
 
@@ -343,6 +343,14 @@ async def list_combined_filtered(
 
     today = date.today()
     review_filter = due_for_review is True or overdue is True
+
+    search_term = search.strip() if search and search.strip() else None
+    search_id: int | None = None
+    if search_term is not None:
+        try:
+            search_id = int(search_term)
+        except ValueError:
+            pass
 
     cache_key = cache_keys.items_list(
         page=page,
@@ -416,8 +424,11 @@ async def list_combined_filtered(
             event_q = event_q.where(Event.updated_at >= last_updated_start)
         if last_updated_end is not None:
             event_q = event_q.where(Event.updated_at <= last_updated_end)
-        if search and search.strip():
-            event_q = event_q.where(Event.event_name.ilike(f"%{search.strip()}%"))
+        if search_term is not None:
+            cond = Event.event_name.ilike(f"%{search_term}%")
+            if search_id is not None:
+                cond = or_(cond, Event.id == search_id)
+            event_q = event_q.where(cond)
         if owner_staff_ids is not None:
             if owner_staff_ids:
                 event_q = event_q.where(Event.updated_by.in_(owner_staff_ids))
@@ -466,8 +477,11 @@ async def list_combined_filtered(
         doc_q = doc_q.where(_document_due_for_review(today))
     if overdue is True:
         doc_q = doc_q.where(_document_overdue(today))
-    if search and search.strip():
-        doc_q = doc_q.where(Document.name.ilike(f"%{search.strip()}%"))
+    if search_term is not None:
+        cond = Document.name.ilike(f"%{search_term}%")
+        if search_id is not None:
+            cond = or_(cond, Document.id == search_id)
+        doc_q = doc_q.where(cond)
     if owner_staff_ids is not None:
         if owner_staff_ids:
             doc_q = doc_q.where(Document.updated_by.in_(owner_staff_ids))

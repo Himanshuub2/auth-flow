@@ -549,10 +549,17 @@ async def get_linked_options_paginated(
 
     ``search`` applies as ILIKE substring only when
     ``len(search.strip()) >= LINKED_OPTIONS_MIN_SEARCH_LEN``.
+    When search is an integer, also matches id.
     """
     raw_search = (search or "").strip()
     apply_search = len(raw_search) >= LINKED_OPTIONS_MIN_SEARCH_LEN
     pattern = f"%{raw_search}%" if apply_search else None
+    search_id: int | None = None
+    if raw_search:
+        try:
+            search_id = int(raw_search)
+        except ValueError:
+            pass
 
     if not doc_types and not include_events:
         return [], 0
@@ -568,7 +575,12 @@ async def get_linked_options_paginated(
         if exclude_id is not None:
             conds.append(Document.id != exclude_id)
         if apply_search and pattern is not None:
-            conds.append(Document.name.ilike(pattern))
+            cond = Document.name.ilike(pattern)
+            if search_id is not None:
+                cond = or_(cond, Document.id == search_id)
+            conds.append(cond)
+        elif search_id is not None:
+            conds.append(Document.id == search_id)
 
         total = (
             await db.execute(select(func.count()).select_from(Document).where(*conds))
@@ -599,12 +611,15 @@ async def get_linked_options_paginated(
             Event.replaces_document_id.is_(None),
         ]
         if apply_search and pattern is not None:
-            e_conds.append(
-                or_(
-                    Event.event_name.ilike(pattern),
-                    Event.sub_event_name.ilike(pattern),
-                ),
+            cond = or_(
+                Event.event_name.ilike(pattern),
+                Event.sub_event_name.ilike(pattern),
             )
+            if search_id is not None:
+                cond = or_(cond, Event.id == search_id)
+            e_conds.append(cond)
+        elif search_id is not None:
+            e_conds.append(Event.id == search_id)
         total = (
             await db.execute(select(func.count()).select_from(Event).where(*e_conds))
         ).scalar_one()
@@ -641,7 +656,12 @@ async def get_linked_options_paginated(
     if exclude_id is not None:
         doc_conds.append(Document.id != exclude_id)
     if apply_search and pattern is not None:
-        doc_conds.append(Document.name.ilike(pattern))
+        cond = Document.name.ilike(pattern)
+        if search_id is not None:
+            cond = or_(cond, Document.id == search_id)
+        doc_conds.append(cond)
+    elif search_id is not None:
+        doc_conds.append(Document.id == search_id)
 
     event_display = case(
         (
@@ -655,12 +675,15 @@ async def get_linked_options_paginated(
         Event.replaces_document_id.is_(None),
     ]
     if apply_search and pattern is not None:
-        e_conds.append(
-            or_(
-                Event.event_name.ilike(pattern),
-                Event.sub_event_name.ilike(pattern),
-            ),
+        cond = or_(
+            Event.event_name.ilike(pattern),
+            Event.sub_event_name.ilike(pattern),
         )
+        if search_id is not None:
+            cond = or_(cond, Event.id == search_id)
+        e_conds.append(cond)
+    elif search_id is not None:
+        e_conds.append(Event.id == search_id)
 
     doc_sel = (
         select(
@@ -1425,6 +1448,29 @@ async def _get_or_create_draft(
     await db.flush()
     parent_to_draft_id = {pid: nf.id for pid, nf in zip(parent_ids_for_new_files, new_files)}
     draft.staging_file_ids = [f.id for f in new_files]
+
+    parent_revisions = (await db.execute(
+        select(DocumentRevision)
+        .where(DocumentRevision.document_id == parent.id)
+        .order_by(DocumentRevision.media_version, DocumentRevision.revision_number)
+    )).scalars().all()
+    for rev in parent_revisions:
+        draft_file_ids = [parent_to_draft_id.get(fid, fid) for fid in (rev.file_ids or [])]
+        db.add(DocumentRevision(
+            document_id=draft.id,
+            media_version=rev.media_version,
+            revision_number=rev.revision_number,
+            name=rev.name,
+            document_type=rev.document_type,
+            tags=rev.tags,
+            summary=rev.summary,
+            applicability_type=rev.applicability_type,
+            applicability_refs=rev.applicability_refs,
+            file_ids=draft_file_ids,
+            created_by=rev.created_by,
+        ))
+    await db.flush()
+
     return draft, parent_to_draft_id
 
 
@@ -1491,15 +1537,21 @@ async def _absorb_and_publish(db: AsyncSession, successor: Document, parent: Doc
 
     await asyncio.gather(
         db.execute(
-            update(DocumentRevision)
-            .where(DocumentRevision.document_id == parent.id)
-            .values(document_id=successor.id)
+            delete(DocumentRevision)
+            .where(DocumentRevision.document_id == successor.id)
         ),
         db.execute(
             update(DocumentFile)
             .where(DocumentFile.document_id == parent.id)
             .values(document_id=successor.id)
         ),
+    )
+    await db.flush()
+
+    await db.execute(
+        update(DocumentRevision)
+        .where(DocumentRevision.document_id == parent.id)
+        .values(document_id=successor.id)
     )
     await db.flush()
 
