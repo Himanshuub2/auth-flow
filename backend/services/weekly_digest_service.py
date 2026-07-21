@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
+import io
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from html import escape
 from typing import Any
+from urllib.parse import unquote
+from urllib.request import urlopen
 
 from utils.dates import IST
+
+logger = logging.getLogger(__name__)
 
 DOCUMENT_TYPE_LABELS: dict[str, str] = {
     "POLICY": "Policy",
@@ -80,6 +87,156 @@ def _event_link(base_url: str, event_id: int) -> str:
     return f"{base_url.rstrip('/')}/events/{event_id}"
 
 
+THUMBNAIL_MAX_SIZE = (300, 225)  # 4:3 aspect, fits email grid nicely
+THUMBNAIL_JPEG_QUALITY = 60
+
+
+def _parse_file_ids(raw: Any) -> list[int]:
+    """Parse file_ids from JSON array column."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [int(x) for x in raw if x is not None]
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, list):
+                return [int(x) for x in decoded if x is not None]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []
+
+
+def _resolve_blob_path(path_or_url: str, container_name: str) -> str:
+    """Return blob path from a stored blob path or full Azure blob URL."""
+    if "://" not in path_or_url:
+        return path_or_url.lstrip("/")
+    try:
+        base = path_or_url.split("?", 1)[0]
+        prefix = f"/{container_name}/"
+        if prefix not in base:
+            return path_or_url
+        idx = base.index(prefix) + len(prefix)
+        raw = base[idx:].strip("/")
+        return unquote(raw) if raw else path_or_url
+    except Exception:
+        return path_or_url
+
+
+def _fetch_blob_bytes_from_azure(path_or_url: str) -> bytes | None:
+    """Download blob bytes from Azure using connection string (sync)."""
+    from config import settings
+
+    if not path_or_url or not str(path_or_url).strip():
+        return None
+
+    if getattr(settings, "BYPASS_AZURE_UPLOAD", False):
+        try:
+            import hashlib
+
+            blob_path = _resolve_blob_path(path_or_url, settings.AZURE_CONTAINER_NAME)
+            seed = hashlib.md5(blob_path.encode()).hexdigest()[:8]
+            fake_url = f"https://picsum.photos/seed/{seed}/400/300"
+            with urlopen(fake_url, timeout=15) as resp:
+                return resp.read()
+        except Exception:
+            logger.warning(
+                "Failed to fetch bypass placeholder for blob: %s",
+                path_or_url,
+                exc_info=True,
+            )
+            return None
+
+    conn_str = settings.AZURE_STORAGE_CONNECTION_STRING
+    container_name = settings.AZURE_CONTAINER_NAME
+    if not conn_str:
+        logger.warning("AZURE_STORAGE_CONNECTION_STRING is not configured")
+        return None
+
+    blob_path = _resolve_blob_path(path_or_url, container_name)
+    try:
+        blob_module = importlib.import_module("azure.storage.blob")
+        blob_service_client_cls = getattr(blob_module, "BlobServiceClient")
+        client = blob_service_client_cls.from_connection_string(conn_str)
+        blob_client = client.get_blob_client(container=container_name, blob=blob_path)
+        return blob_client.download_blob().readall()
+    except Exception:
+        logger.warning(
+            "Failed to fetch blob from Azure: container=%s blob=%s",
+            container_name,
+            blob_path,
+            exc_info=True,
+        )
+        return None
+
+
+def _compress_image_to_base64(image_bytes: bytes) -> str:
+    """Compress image bytes to a JPEG thumbnail and return base64 data URI."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_bytes))
+    img = img.convert("RGB")
+    img.thumbnail(THUMBNAIL_MAX_SIZE, Image.LANCZOS)
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY, optimize=True)
+    b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def _fetch_and_compress_blob(path_or_url: str) -> str | None:
+    """Fetch blob from Azure and compress to base64 thumbnail."""
+    image_bytes = _fetch_blob_bytes_from_azure(path_or_url)
+    if not image_bytes:
+        return None
+    try:
+        return _compress_image_to_base64(image_bytes)
+    except Exception:
+        logger.warning(
+            "Failed to compress blob image: %s",
+            path_or_url,
+            exc_info=True,
+        )
+        return None
+
+
+def _fetch_files_for_ids(
+    cursor,
+    file_ids: list[int],
+    schema: str,
+) -> list[dict[str, Any]]:
+    """Fetch file records from documents.files or events.files by IDs."""
+    if not file_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(file_ids))
+    sql = f"""
+        SELECT id, file_type, file_url, thumbnail_url
+        FROM {schema}.files
+        WHERE id IN ({placeholders})
+        ORDER BY sort_order ASC;
+    """
+    cursor.execute(sql, file_ids)
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def _pick_thumbnail_source_for_event(files: list[dict[str, Any]]) -> str | None:
+    """Pick blob path/URL for an event card: prefer IMAGE, fallback to video thumbnail."""
+    for f in files:
+        if f["file_type"] == "IMAGE" and f.get("file_url"):
+            return f["file_url"]
+    for f in files:
+        if f["file_type"] == "VIDEO" and f.get("thumbnail_url"):
+            return f["thumbnail_url"]
+    return None
+
+
+def _pick_thumbnail_source_for_document(files: list[dict[str, Any]]) -> str | None:
+    """Pick blob path/URL for a flyer document card."""
+    for f in files:
+        if f["file_type"] == "IMAGE" and f.get("file_url"):
+            return f["file_url"]
+    return None
+
+
 def create_acs_email_client(connection_string: str) -> Any:
     """Create Azure Communication Services EmailClient from connection string."""
     email_module = importlib.import_module("azure.communication.email")
@@ -124,37 +281,47 @@ def _build_payload_from_rows(
     start_utc: datetime,
     end_utc: datetime,
     base_url: str,
+    doc_file_map: dict[int, str | None] | None = None,
+    event_file_map: dict[int, str | None] | None = None,
 ) -> dict[str, Any]:
+    doc_file_map = doc_file_map or {}
+    event_file_map = event_file_map or {}
+
     documents: list[dict[str, Any]] = []
     for row in doc_rows:
         doc_type = str(row["document_type"])
         if doc_type not in ALLOWED_WEEKLY_DOCUMENT_TYPES:
             continue
         tags = _safe_tags(row["tags"])[:3]
+        doc_id = int(row["document_id"])
+        thumbnail_b64 = doc_file_map.get(doc_id) if doc_type == "FLYER" else None
         documents.append(
             {
-                "id": int(row["document_id"]),
+                "id": doc_id,
                 "name": row["name"],
                 "document_type": doc_type,
                 "document_type_label": DOCUMENT_TYPE_LABELS.get(doc_type, doc_type),
                 "heading": DOC_HEADING_BY_TYPE.get(doc_type, "New document available"),
                 "description": row["summary"] or "",
                 "tags": tags,
-                "link": _doc_link(base_url, doc_type, int(row["document_id"])),
+                "link": _doc_link(base_url, doc_type, doc_id),
                 "created_at_utc": row["created_at"].isoformat() if row["created_at"] else None,
+                "thumbnail_base64": thumbnail_b64,
             }
         )
 
     events: list[dict[str, Any]] = []
     for row in event_rows:
+        event_id = int(row["event_id"])
         events.append(
             {
-                "id": int(row["event_id"]),
+                "id": event_id,
                 "name": row["event_name"],
                 "description": row["description"] or "",
                 "heading": "New Event(s) added",
-                "link": _event_link(base_url, int(row["event_id"])),
+                "link": _event_link(base_url, event_id),
                 "created_at_utc": row["created_at"].isoformat() if row["created_at"] else None,
+                "thumbnail_base64": event_file_map.get(event_id),
             }
         )
 
@@ -227,7 +394,8 @@ def build_weekly_digest_payload_sync(
             latest.document_type,
             latest.summary,
             latest.tags,
-            latest.created_at
+            latest.created_at,
+            latest.file_ids
         FROM (
             SELECT DISTINCT ON (document_id)
                 *
@@ -243,7 +411,8 @@ def build_weekly_digest_payload_sync(
             latest.event_id,
             latest.event_name,
             latest.description,
-            latest.created_at
+            latest.created_at,
+            latest.file_ids
         FROM (
             SELECT DISTINCT ON (event_id)
                 *
@@ -258,6 +427,7 @@ def build_weekly_digest_payload_sync(
     bind = {"start_utc": start_utc, "end_utc": end_utc}
     psycopg2_extras = importlib.import_module("psycopg2.extras")
     real_dict_cursor = getattr(psycopg2_extras, "RealDictCursor")
+
     with create_psycopg2_connection(db_config) as conn:
         with conn.cursor(cursor_factory=real_dict_cursor) as cur:
             cur.execute(documents_sql, bind)
@@ -265,12 +435,39 @@ def build_weekly_digest_payload_sync(
             cur.execute(events_sql, bind)
             event_rows = list(cur.fetchall())
 
+            # Fetch file thumbnails for flyer documents
+            doc_file_map: dict[int, str | None] = {}
+            for row in doc_rows:
+                doc_type = str(row["document_type"])
+                if doc_type != "FLYER":
+                    continue
+                file_ids = _parse_file_ids(row.get("file_ids"))
+                if not file_ids:
+                    continue
+                files = _fetch_files_for_ids(cur, file_ids, "documents")
+                blob_source = _pick_thumbnail_source_for_document(files)
+                if blob_source:
+                    doc_file_map[int(row["document_id"])] = _fetch_and_compress_blob(blob_source)
+
+            # Fetch file thumbnails for events
+            event_file_map: dict[int, str | None] = {}
+            for row in event_rows:
+                file_ids = _parse_file_ids(row.get("file_ids"))
+                if not file_ids:
+                    continue
+                files = _fetch_files_for_ids(cur, file_ids, "events")
+                blob_source = _pick_thumbnail_source_for_event(files)
+                if blob_source:
+                    event_file_map[int(row["event_id"])] = _fetch_and_compress_blob(blob_source)
+
     return _build_payload_from_rows(
         doc_rows,
         event_rows,
         start_utc=start_utc,
         end_utc=end_utc,
         base_url=base_url,
+        doc_file_map=doc_file_map,
+        event_file_map=event_file_map,
     )
 
 
@@ -414,93 +611,107 @@ async def build_and_send_weekly_digest(
 
 
 def _render_doc_card(item: dict[str, Any]) -> str:
-    # Solid soft blues (Outlook often ignores CSS gradients and shows white).
-    doc_bg = [
-        "#eaf5ff",
-        "#edf2ff",
-        "#e8f8ff",
-        "#f0f4ff",
-        "#e6f4ff",
-    ]
+    thumbnail = item.get("thumbnail_base64")
+    doc_type = item.get("document_type", "")
+    is_flyer = doc_type == "FLYER"
     tags = item.get("tags") or []
-    card_index = int(item.get("_index", 0)) % len(doc_bg)
-    bg = doc_bg[card_index]
-    tag_html = "".join(
-        f"<span style=\"display:inline-block;background:#ffffff;color:#0f3f7a;"
-        f"font-size:12px;line-height:16px;padding:4px 8px;border-radius:999px;"
-        f"margin:0 6px 6px 0;\">{escape(str(tag))}</span>"
-        for tag in tags
-    )
+
+    if is_flyer and thumbnail:
+        # Flyer card: image + name + arrow link (same layout as event cards)
+        return (
+            '<table role="presentation" class="kh-card" width="100%" cellpadding="0" cellspacing="0" '
+            'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px;">'
+            '<tr><td style="line-height:0;">'
+            f'<img src="{thumbnail}" width="100%" alt="{escape(item["name"])}" '
+            'style="display:block; width:100%; height:auto; aspect-ratio:4/3; '
+            'object-fit:cover; border-radius:6px 6px 0 0;">'
+            '</td></tr>'
+            '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
+            '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+            '<td bgcolor="#2B6CB0" style="padding:2px 8px; border-radius:3px;">'
+            f'<span style="font-size:10px; font-weight:bold; color:#ffffff; text-transform:uppercase; '
+            f'letter-spacing:0.4px;">{escape(item["document_type_label"])}</span>'
+            '</td></tr></table>'
+            f'<span style="display:block; font-size:13px; font-weight:bold; color:#111111; margin-top:6px; '
+            f'mso-line-height-rule:exactly; line-height:18px; overflow:hidden;">{escape(item["name"])}</span>'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
+            '<tr><td align="right">'
+            f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
+            'font-family:Arial,Helvetica,sans-serif; font-size:16px; color:#2B6CB0; font-weight:bold; '
+            'text-decoration:none;">&rarr;</a>'
+            '</td></tr></table>'
+            '</td></tr></table>'
+        )
+
+    # Non-flyer card: text-only with type badge, name, tags, description, link
+    tag_html = ""
+    if tags:
+        tag_parts = " &middot; ".join(escape(str(t)) for t in tags)
+        tag_html = (
+            f'<span style="display:block; font-size:11px; color:#2B6CB0; margin-top:6px; '
+            f'overflow:hidden;">{tag_parts}</span>'
+        )
+
+    description = item.get("description", "")
+    desc_html = ""
+    if description:
+        desc_html = (
+            f'<span style="display:block; font-size:12px; line-height:17px; color:#555555; '
+            f'margin-top:5px; overflow:hidden; max-height:34px;">{escape(description)}</span>'
+        )
+
     return (
-        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-        f"bgcolor=\"{bg}\" style=\"border-collapse:separate;border-spacing:0;background-color:{bg};"
-        "border:1px solid #c5dcff;border-radius:10px;\">"
-        "<tr><td style=\"padding:16px;font-family:'Segoe UI',Arial,sans-serif;color:#1a1a1a;\">"
-        f"<div style=\"font-size:12px;font-weight:700;color:#154f9f;text-transform:uppercase;letter-spacing:.4px;\">{escape(item['heading'])}</div>"
-        f"<div style=\"font-size:16px;line-height:22px;font-weight:700;margin-top:6px;color:#0b2f66;\">{escape(item['name'])}</div>"
-        f"<div style=\"font-size:13px;line-height:18px;color:#235b9f;margin-top:6px;\">Type: {escape(item['document_type_label'])}</div>"
-        f"<div style=\"font-size:14px;line-height:21px;color:#27384f;margin-top:8px;\">{escape(item['description'])}</div>"
-        f"<div style=\"margin-top:10px;\">{tag_html}</div>"
-        f"<a href=\"{escape(item['link'])}\" style=\"display:inline-block;margin-top:8px;color:#0c4a92;"
-        "font-size:14px;font-weight:700;text-decoration:none;\">Open document</a>"
-        "</td></tr></table>"
+        '<table role="presentation" class="kh-card" width="100%" cellpadding="0" cellspacing="0" '
+        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px;">'
+        '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+        '<td bgcolor="#2B6CB0" style="padding:2px 8px; border-radius:3px;">'
+        f'<span style="font-size:10px; font-weight:bold; color:#ffffff; text-transform:uppercase; '
+        f'letter-spacing:0.4px;">{escape(item["document_type_label"])}</span>'
+        '</td></tr></table>'
+        f'<span style="display:block; font-size:13px; font-weight:bold; color:#111111; margin-top:6px; '
+        f'mso-line-height-rule:exactly; line-height:18px; overflow:hidden;">{escape(item["name"])}</span>'
+        f'{tag_html}'
+        f'{desc_html}'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
+        '<tr><td align="right">'
+        f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
+        'font-family:Arial,Helvetica,sans-serif; font-size:16px; color:#2B6CB0; font-weight:bold; '
+        'text-decoration:none;">&rarr;</a>'
+        '</td></tr></table>'
+        '</td></tr></table>'
     )
 
 
 def _render_event_card(item: dict[str, Any]) -> str:
-    event_bg = [
-        "#eef4ff",
-        "#f0efff",
-        "#e9f7ff",
-        "#eef1ff",
-        "#e8f4ff",
-    ]
-    card_index = int(item.get("_index", 0)) % len(event_bg)
-    bg = event_bg[card_index]
+    thumbnail = item.get("thumbnail_base64")
+    image_html = ""
+    if thumbnail:
+        image_html = (
+            '<tr><td style="line-height:0;">'
+            f'<img src="{thumbnail}" width="100%" alt="{escape(item["name"])}" '
+            'style="display:block; width:100%; height:auto; aspect-ratio:4/3; '
+            'object-fit:cover; border-radius:6px 6px 0 0;">'
+            '</td></tr>'
+        )
+
     return (
-        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-        f"bgcolor=\"{bg}\" style=\"border-collapse:separate;border-spacing:0;background-color:{bg};"
-        "border:1px solid #c9dfff;border-radius:10px;\">"
-        "<tr><td style=\"padding:16px;font-family:'Segoe UI',Arial,sans-serif;color:#1a1a1a;\">"
-        "<div style=\"font-size:12px;font-weight:700;color:#164d9c;text-transform:uppercase;letter-spacing:.4px;\">New Event(s) added</div>"
-        f"<div style=\"font-size:16px;line-height:22px;font-weight:700;margin-top:6px;color:#102e61;\">{escape(item['name'])}</div>"
-        f"<div style=\"font-size:14px;line-height:21px;color:#2b3f5e;margin-top:8px;\">{escape(item['description'])}</div>"
-        f"<a href=\"{escape(item['link'])}\" style=\"display:inline-block;margin-top:10px;color:#0c4a92;"
-        "font-size:14px;font-weight:700;text-decoration:none;\">Open event</a>"
-        "</td></tr></table>"
+        '<table role="presentation" class="ev-card" width="100%" cellpadding="0" cellspacing="0" '
+        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px;">'
+        f'{image_html}'
+        '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
+        f'<span style="display:block; font-size:13px; font-weight:bold; color:#111111; '
+        f'mso-line-height-rule:exactly; line-height:18px; overflow:hidden;">{escape(item["name"])}</span>'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
+        '<tr><td align="right">'
+        f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
+        'font-family:Arial,Helvetica,sans-serif; font-size:16px; color:#2B6CB0; font-weight:bold; '
+        'text-decoration:none;">&rarr;</a>'
+        '</td></tr></table>'
+        '</td></tr></table>'
     )
 
 
-def _render_grid(cards: list[str], empty_message: str) -> str:
-    if not cards:
-        return (
-            "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-            "style=\"border-collapse:collapse;background:#f7fbff;border:1px dashed #bfd6ff;border-radius:10px;\">"
-            f"<tr><td style=\"padding:20px;font-family:'Segoe UI',Arial,sans-serif;color:#36557c;font-size:14px;\">{escape(empty_message)}</td></tr>"
-            "</table>"
-        )
-
-    rows: list[str] = []
-    for i in range(0, len(cards), 2):
-        left = cards[i]
-        right = cards[i + 1] if i + 1 < len(cards) else ""
-        right_cell = (
-            f"<td valign=\"top\" width=\"50%\" style=\"padding:8px;\">{right}</td>"
-            if right
-            else "<td valign=\"top\" width=\"50%\" style=\"padding:8px;\"></td>"
-        )
-        rows.append(
-            "<tr>"
-            f"<td valign=\"top\" width=\"50%\" style=\"padding:8px;\">{left}</td>"
-            f"{right_cell}"
-            "</tr>"
-        )
-    return (
-        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-        "style=\"border-collapse:collapse;\">"
-        + "".join(rows)
-        + "</table>"
-    )
 
 
 def _sample_digest_items() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -509,46 +720,56 @@ def _sample_digest_items() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         {
             "heading": "New flyer available",
             "name": "Critical Third-Party Cyber Risk Awareness Flyer for Multi-Entity Compliance and Continuous Monitoring Excellence",
+            "document_type": "FLYER",
             "document_type_label": "Flyer",
             "description": "A detailed communication flyer explaining cross-functional due diligence, escalation protocols, and continuous observation requirements for high-risk third-party onboarding and lifecycle governance.",
             "tags": ["Cyber Risk", "Third Party", "Awareness"],
             "link": "https://ecp.com/flyer/1001",
+            "thumbnail_base64": None,
             "_index": 0,
         },
         {
             "heading": "New Policy, Law regulation available",
             "name": "Enterprise Policy on Data Protection, Consent Governance, and Cross-Border Information Processing Controls",
+            "document_type": "POLICY",
             "document_type_label": "Policy",
             "description": "This policy defines long-form obligations for teams handling personally identifiable data, mandatory retention boundaries, internal approval controls, and legal review checkpoints.",
             "tags": ["Data Privacy", "Policy", "Governance"],
             "link": "https://ecp.com/policy/1002",
+            "thumbnail_base64": None,
             "_index": 1,
         },
         {
             "heading": "New training material available",
             "name": "Advanced Training Material for Regulatory Reporting Accuracy, Audit Readiness, and Exception Handling Procedures",
+            "document_type": "TRAINING_MATERIAL",
             "document_type_label": "Training Material",
             "description": "Comprehensive training content covering scenario-based reporting practices, validation workflows, and long-text guidance for correcting filing exceptions without timeline slippage.",
             "tags": ["Training", "Reporting", "Audit"],
             "link": "https://ecp.com/training_material/1003",
+            "thumbnail_base64": None,
             "_index": 2,
         },
         {
             "heading": "New Policy, Law regulation available",
             "name": "Updated Anti-Bribery and Conflict-of-Interest Policy for Vendor Engagement, Entertainment, and Hospitality Disclosures",
+            "document_type": "POLICY",
             "document_type_label": "Policy",
             "description": "A practical policy update that clarifies declaration thresholds, investigative responsibilities, and periodic attestation requirements across procurement and business support functions.",
             "tags": ["Ethics", "Policy", "Vendors"],
             "link": "https://ecp.com/policy/1004",
+            "thumbnail_base64": None,
             "_index": 3,
         },
         {
             "heading": "New flyer available",
             "name": "Information Security Incident Reporting Flyer for Rapid Internal Notification and Coordinated Compliance Response",
+            "document_type": "FLYER",
             "document_type_label": "Flyer",
             "description": "An operational flyer that lists immediate reporting channels, evidence preservation reminders, and communication checkpoints to support timely legal and compliance intervention.",
             "tags": ["Incident", "Security", "Response"],
             "link": "https://ecp.com/flyer/1005",
+            "thumbnail_base64": None,
             "_index": 4,
         },
     ]
@@ -557,30 +778,35 @@ def _sample_digest_items() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             "name": "Compliance Townhall on Emerging Regulatory Trends, Supervisory Expectations, and Cross-Border Governance Preparedness",
             "description": "A broad leadership session to discuss major regulatory developments, practical controls alignment, and sustained evidence practices for internal and external stakeholder confidence.",
             "link": "https://ecp.com/events/2001",
+            "thumbnail_base64": None,
             "_index": 0,
         },
         {
             "name": "Hands-On Workshop for Case Management Documentation Quality and Risk-Based Escalation Decisioning",
             "description": "Interactive workshop focused on drafting robust case narratives, documenting rationale clearly, and improving escalation quality for complex multi-factor incidents.",
             "link": "https://ecp.com/events/2002",
+            "thumbnail_base64": None,
             "_index": 1,
         },
         {
             "name": "Training Session on Investigative Interview Standards, Evidence Integrity, and Defensible Closure Reporting",
             "description": "A scenario-rich program that provides practical methods for interview preparation, evidence chain handling, and producing closure reports that withstand review.",
             "link": "https://ecp.com/events/2003",
+            "thumbnail_base64": None,
             "_index": 2,
         },
         {
             "name": "Panel Discussion on Internal Controls Optimization, Policy Usability, and Department-Wide Adoption Strategy",
             "description": "Cross-team discussion around balancing control strength with operational usability, including examples of successful rollout playbooks and accountability models.",
             "link": "https://ecp.com/events/2004",
+            "thumbnail_base64": None,
             "_index": 3,
         },
         {
             "name": "Knowledge Sharing Forum for Lessons Learned from Recent Audit Observations and Corrective Action Execution",
             "description": "An extended knowledge forum to review recurring audit findings, strong remediation approaches, and methods to prevent repeat observations through durable ownership.",
             "link": "https://ecp.com/events/2005",
+            "thumbnail_base64": None,
             "_index": 4,
         },
     ]
@@ -597,6 +823,62 @@ def _with_card_index(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _render_events_grid(cards: list[str]) -> str:
+    """Render event cards in a 2-column grid layout."""
+    if not cards:
+        return (
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+            '<tr><td style="padding:20px 40px; font-family:Arial,Helvetica,sans-serif; font-size:14px; color:#A8CCE8;">'
+            'No events this week.</td></tr></table>'
+        )
+    rows_html = ""
+    for i in range(0, len(cards), 2):
+        left = cards[i]
+        right = cards[i + 1] if i + 1 < len(cards) else ""
+        right_cell = (
+            f'<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;">{right}</td>'
+            if right
+            else '<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;"></td>'
+        )
+        rows_html += (
+            '<tr>'
+            '<td class="mobile-pad" style="padding:10px 40px 0 40px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td class="stack-col col-pad-right" valign="top" width="50%" style="width:50%; padding-right:8px;">{left}</td>'
+            f'{right_cell}'
+            '</tr></table></td></tr>'
+        )
+    return rows_html
+
+
+def _render_knowledge_grid(cards: list[str]) -> str:
+    """Render knowledge hub cards in a 2-column grid layout."""
+    if not cards:
+        return (
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+            '<tr><td style="padding:20px 40px; font-family:Arial,Helvetica,sans-serif; font-size:14px; color:#A8CCE8;">'
+            'No Knowledge Hub items this week.</td></tr></table>'
+        )
+    rows_html = ""
+    for i in range(0, len(cards), 2):
+        left = cards[i]
+        right = cards[i + 1] if i + 1 < len(cards) else ""
+        right_cell = (
+            f'<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;">{right}</td>'
+            if right
+            else '<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;"></td>'
+        )
+        rows_html += (
+            '<tr>'
+            '<td class="mobile-pad" style="padding:10px 40px 0 40px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td class="stack-col col-pad-right" valign="top" width="50%" style="width:50%; padding-right:8px;">{left}</td>'
+            f'{right_cell}'
+            '</tr></table></td></tr>'
+        )
+    return rows_html
+
+
 def build_weekly_digest_html(
     payload: dict[str, Any],
     *,
@@ -604,7 +886,7 @@ def build_weekly_digest_html(
     use_sample_data: bool = True,
 ) -> str:
     """
-    Build Outlook-safe HTML digest.
+    Build Outlook-safe HTML digest using the new full-width dark template.
 
     use_sample_data=True  -> demo cards (preview / local test)
     use_sample_data=False -> real payload from DB
@@ -615,107 +897,161 @@ def build_weekly_digest_html(
         knowledge_hub = _with_card_index(list(payload.get("knowledge_hub") or []))
         events = _with_card_index(list(payload.get("events") or []))
 
+    period_label = ""
+    if payload and payload.get("period"):
+        period_label = payload["period"].get("label", "")
+
     knowledge_cards = [_render_doc_card(item) for item in knowledge_hub]
     event_cards = [_render_event_card(item) for item in events]
 
-    if banner_image_url:
-        banner_html = (
-            f"<img src=\"{escape(banner_image_url)}\" alt=\"Weekly digest banner\" width=\"640\" "
-            "style=\"display:block;width:100%;max-width:640px;height:auto;border:0;\">"
-        )
-    else:
-        # Solid color bands so Outlook shows color (CSS gradients often render white).
-        banner_html = (
-            "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-            "style=\"border-collapse:collapse;\">"
-            "<tr><td bgcolor=\"#0a4d96\" height=\"8\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
-            "<tr>"
-            "<td bgcolor=\"#1565c0\" style=\"padding:26px 24px;font-family:'Segoe UI',Arial,sans-serif;color:#ffffff;\">"
-            "<div style=\"font-size:22px;line-height:28px;font-weight:700;\">Weekly Knowledge &amp; Events Digest</div>"
-            "<div style=\"font-size:14px;line-height:20px;margin-top:6px;color:#d6e8ff;\">"
-            "Highlights from Knowledge Hub and Events"
-            "</div>"
-            "</td>"
-            "</tr>"
-            "<tr><td bgcolor=\"#42a5f5\" height=\"6\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
-            "</table>"
-        )
+    events_grid = _render_events_grid(event_cards)
+    knowledge_grid = _render_knowledge_grid(knowledge_cards)
 
-    footer_html = (
-        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-        "style=\"border-collapse:collapse;\">"
-        "<tr><td bgcolor=\"#42a5f5\" height=\"4\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
-        "<tr>"
-        "<td bgcolor=\"#0d47a1\" style=\"padding:22px 24px;font-family:'Segoe UI',Arial,sans-serif;color:#ffffff;\">"
-        "<div style=\"font-size:14px;line-height:20px;\">Regards,</div>"
-        "<div style=\"font-size:15px;line-height:22px;font-weight:700;margin-top:2px;\">Compliance Team</div>"
-        "</td>"
-        "</tr>"
-        "<tr><td bgcolor=\"#0a4d96\" height=\"8\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>"
-        "</table>"
-    )
+    return f"""<!DOCTYPE html>
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>MSIL Compliance Weekly Digest</title>
+<!--[if mso]>
+<noscript>
+<xml>
+<o:OfficeDocumentSettings>
+<o:PixelsPerInch>96</o:PixelsPerInch>
+</o:OfficeDocumentSettings>
+</xml>
+</noscript>
+<style>
+table {{border-collapse: collapse;}}
+td, th, div, p, a, h1, h2, h3 {{font-family: Arial, Helvetica, sans-serif;}}
+</style>
+<![endif]-->
+<style>
+  body, table, td, a {{ -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }}
+  table, td {{ mso-table-lspace: 0pt; mso-table-rspace: 0pt; }}
+  img {{ -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; }}
+  body {{ margin: 0; padding: 0; width: 100% !important; height: 100% !important; }}
+  a {{ text-decoration: none; }}
+  .arrow-link:hover {{ opacity: 0.7; }}
+  .ev-card:hover, .kh-card:hover {{ box-shadow: 0 4px 16px rgba(0,50,120,0.15); }}
+  @media screen and (max-width: 680px) {{
+    .email-wrapper {{ width: 100% !important; }}
+    .stack-col {{ display: block !important; width: 100% !important; max-width: 100% !important; }}
+    .col-pad-right {{ padding-right: 0 !important; padding-bottom: 12px !important; }}
+    .mobile-pad {{ padding-left: 16px !important; padding-right: 16px !important; }}
+    .banner-title {{ font-size: 26px !important; }}
+    .banner-cell {{ padding: 60px 20px 70px 20px !important; }}
+  }}
+</style>
+</head>
+<body style="margin:0; padding:0; -webkit-font-smoothing:antialiased; background-color:#0B1D3A;">
 
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
-    <meta name="supported-color-schemes" content="light dark">
-    <title>Weekly Digest</title>
-    <style>
-      body {{
-        margin: 0 !important;
-        padding: 0 !important;
-        background-color: #dcecff !important;
-      }}
-      @media screen and (max-width: 640px) {{
-        .container {{
-          width: 100% !important;
-        }}
-      }}
-    </style>
-  </head>
-  <body style="margin:0;padding:0;background-color:#dcecff;">
-    <!-- Outer wrap: soft multi-tone background for Outlook + other clients -->
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-           bgcolor="#dcecff" style="border-collapse:collapse;background-color:#dcecff;">
-      <tr>
-        <td align="center" bgcolor="#e3f0ff" style="padding:20px 10px;background-color:#e3f0ff;">
-          <table role="presentation" class="container" width="640" cellpadding="0" cellspacing="0" border="0"
-                 bgcolor="#f4f8ff"
-                 style="width:640px;max-width:640px;border-collapse:collapse;background-color:#f4f8ff;">
-            <tr>
-              <td>{banner_html}</td>
-            </tr>
-            <tr>
-              <td bgcolor="#eaf3ff" style="padding:18px 20px 6px 20px;font-family:'Segoe UI',Arial,sans-serif;background-color:#eaf3ff;">
-                <div style="font-size:18px;line-height:24px;font-weight:700;color:#0d3f7d;">Knowledge Hub</div>
-              </td>
-            </tr>
-            <tr>
-              <td bgcolor="#f4f8ff" style="padding:8px 12px 16px 12px;background-color:#f4f8ff;">
-                {_render_grid(knowledge_cards, "No Knowledge Hub items to show.")}
-              </td>
-            </tr>
-            <tr>
-              <td bgcolor="#e8f0ff" style="padding:8px 20px 6px 20px;font-family:'Segoe UI',Arial,sans-serif;background-color:#e8f0ff;">
-                <div style="font-size:18px;line-height:24px;font-weight:700;color:#0d3f7d;">Events</div>
-              </td>
-            </tr>
-            <tr>
-              <td bgcolor="#f4f8ff" style="padding:8px 12px 20px 12px;background-color:#f4f8ff;">
-                {_render_grid(event_cards, "No Events to show.")}
-              </td>
-            </tr>
-            <tr>
-              <td>{footer_html}</td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </body>
+<div style="display:none; max-height:0; overflow:hidden; mso-hide:all; font-size:1px; line-height:1px; color:#0B1D3A;">
+Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
+</div>
+
+<!--[if mso]>
+<v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">
+<v:fill type="tile" color="#0B1D3A"/>
+</v:background>
+<![endif]-->
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; min-width:100%;">
+<tr>
+<td align="center" valign="top" style="padding:0;">
+
+<table role="presentation" class="email-wrapper" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:100%;">
+
+<!-- BANNER -->
+<tr>
+<td style="line-height:0; background-color:#0D2240;">
+<!--[if mso]>
+<v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:100%; height:220px;">
+<v:fill type="gradient" color="#0D2240" color2="#1A4080"/>
+<v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true">
+<![endif]-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(135deg, #0D2240 0%, #1A4A8A 50%, #2B6CB0 100%);">
+<tr>
+<td class="banner-cell" align="center" style="padding:80px 40px 90px 40px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0">
+<tr>
+<td align="center" style="font-family:Arial,Helvetica,sans-serif;">
+<span class="banner-title" style="display:block; font-size:34px; font-weight:bold; color:#ffffff; letter-spacing:1px; mso-line-height-rule:exactly; line-height:42px;">MSIL Compliance Weekly Digest</span>
+<span style="display:block; font-size:14px; color:#A8CCE8; margin-top:6px; letter-spacing:0.5px; mso-line-height-rule:exactly; line-height:20px;">Events &amp; Knowledge Hub updates &mdash; {escape(period_label) if period_label else "this week"}</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+<!--[if mso]>
+</v:textbox>
+</v:rect>
+<![endif]-->
+</td>
+</tr>
+
+<!-- EVENTS SECTION HEADING -->
+<tr>
+<td class="mobile-pad" style="padding:28px 40px 6px 40px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+<tr>
+<td style="padding-bottom:4px;">
+<span style="font-family:Arial,Helvetica,sans-serif; font-size:18px; font-weight:bold; color:#ffffff; letter-spacing:0.5px;">This Week's Events</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+
+<!-- EVENTS GRID -->
+{events_grid}
+
+<!-- SPACER -->
+<tr><td style="padding:14px 0 0 0; font-size:1px; line-height:1px;">&nbsp;</td></tr>
+
+<!-- KNOWLEDGE HUB SECTION HEADING -->
+<tr>
+<td class="mobile-pad" style="padding:8px 40px 6px 40px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+<tr>
+<td style="padding-bottom:4px;">
+<span style="font-family:Arial,Helvetica,sans-serif; font-size:18px; font-weight:bold; color:#ffffff; letter-spacing:0.5px;">Knowledge Hub</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+
+<!-- KNOWLEDGE HUB GRID -->
+{knowledge_grid}
+
+<!-- FOOTER -->
+<tr>
+<td style="padding:32px 40px 28px 40px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+<tr>
+<td style="border-top:1px solid rgba(255,255,255,0.15); padding-top:20px; font-family:Arial,Helvetica,sans-serif;">
+<span style="display:block; font-size:14px; color:#ffffff; padding-bottom:10px;">Regards,<br><strong>Compliance Team</strong></span>
+<span style="display:block; font-size:11px; line-height:18px; color:#6A8EAE;">
+This is a weekly digest sent to all employees. You are receiving this because you are part of the organization&rsquo;s distribution list.<br>
+MSIL Corporate Office, Compliance Division
+</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+
+</table>
+</td>
+</tr>
+</table>
+
+</body>
 </html>"""
 
 

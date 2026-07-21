@@ -99,6 +99,8 @@ async def save_event(
             await _publish_event(db, event)
     else:
         event.status = EventStatus.DRAFT
+        if event.replaces_document_id is not None:
+            await _upsert_draft_revision(db, event)
 
     await db.flush()
     await db.refresh(event)
@@ -549,6 +551,51 @@ async def _get_or_create_draft(
 
 
 # -- publish ---------------------------------------------------------------
+
+async def _upsert_draft_revision(db: AsyncSession, draft: Event) -> None:
+    """Upsert the single draft revision row for a draft-of-active-parent.
+
+    The row always sits at revision_number = parent.revision + 1 and is
+    updated in-place on every draft save so there is never more than one
+    draft revision entry for the event.
+    """
+    draft_rev_number = draft.revision + 1
+    existing = (await db.execute(
+        select(EventRevision).where(
+            EventRevision.event_id == draft.id,
+            EventRevision.revision_number == draft_rev_number,
+        )
+    )).scalar_one_or_none()
+    staging_file_ids = list(draft.staging_file_ids or [])
+    if existing:
+        existing.media_version = draft.version
+        existing.event_name = draft.event_name
+        existing.sub_event_name = draft.sub_event_name
+        existing.event_dates = draft.event_dates
+        existing.description = draft.description
+        existing.tags = draft.tags
+        existing.applicability_type = draft.applicability_type
+        existing.applicability_refs = draft.applicability_refs
+        existing.change_remarks = draft.change_remarks
+        existing.file_ids = staging_file_ids
+    else:
+        db.add(EventRevision(
+            event_id=draft.id,
+            media_version=draft.version,
+            revision_number=draft_rev_number,
+            event_name=draft.event_name,
+            sub_event_name=draft.sub_event_name,
+            event_dates=draft.event_dates,
+            description=draft.description,
+            tags=draft.tags,
+            applicability_type=draft.applicability_type,
+            applicability_refs=draft.applicability_refs,
+            change_remarks=draft.change_remarks,
+            file_ids=staging_file_ids,
+            created_by=draft.created_by,
+        ))
+    await db.flush()
+
 
 async def _publish_event(db: AsyncSession, event: Event) -> None:
     last_rev = await _get_latest_revision(db, event.id)

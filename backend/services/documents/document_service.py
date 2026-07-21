@@ -208,6 +208,8 @@ async def save_document(
             await _publish_document(db, doc)
     else:
         doc.status = DocumentStatus.DRAFT
+        if doc.replaces_document_id is not None:
+            await _upsert_draft_revision(db, doc)
 
     await db.flush()
     await db.refresh(doc)
@@ -1207,9 +1209,17 @@ async def get_revision_snapshot(
 ) -> tuple[DocumentRevision, list[DocumentFile]]:
     """Load document revision and files for that revision."""
     revision = await get_revision(db, document_id, revision_number)
-    all_files = await _get_all_files(db, document_id)
-    file_by_id = {f.id: f for f in all_files}
-    files = [file_by_id[fid] for fid in (revision.file_ids or []) if fid in file_by_id]
+    file_ids = list(revision.file_ids or [])
+    if not file_ids:
+        return revision, []
+
+    # Resolve by file id (not document_id) so draft revisions that still
+    # reference parent file ids are included.
+    result = await db.execute(
+        select(DocumentFile).where(DocumentFile.id.in_(file_ids))
+    )
+    file_by_id = {f.id: f for f in result.scalars().all()}
+    files = [file_by_id[fid] for fid in file_ids if fid in file_by_id]
     return revision, files
 
 
@@ -1420,7 +1430,7 @@ async def _get_or_create_draft(
         linked_document_ids=parent.linked_document_ids,
         applicability_type=parent.applicability_type,
         applicability_refs=parent.applicability_refs,
-        revision=parent.revision,
+        revision=parent.revision + 1,
         status=DocumentStatus.DRAFT,
         replaces_document_id=parent.id,
         created_by=user_id,
@@ -1473,6 +1483,47 @@ async def _get_or_create_draft(
 
     return draft, parent_to_draft_id
 
+
+
+async def _upsert_draft_revision(db: AsyncSession, draft: Document) -> None:
+    """Upsert the single draft revision row for a draft-of-active-parent.
+
+    The row always sits at revision_number = parent.revision + 1 and is
+    updated in-place on every draft save so there is never more than one
+    draft revision entry for the document.
+    """
+    draft_rev_number = draft.revision + 1
+    existing = (await db.execute(
+        select(DocumentRevision).where(
+            DocumentRevision.document_id == draft.id,
+            DocumentRevision.revision_number == draft_rev_number,
+        )
+    )).scalar_one_or_none()
+    staging_file_ids = list(draft.staging_file_ids or [])
+    if existing:
+        existing.media_version = draft.version
+        existing.name = draft.name
+        existing.document_type = draft.document_type
+        existing.tags = draft.tags
+        existing.summary = draft.summary
+        existing.applicability_type = draft.applicability_type
+        existing.applicability_refs = draft.applicability_refs
+        existing.file_ids = staging_file_ids
+    else:
+        db.add(DocumentRevision(
+            document_id=draft.id,
+            media_version=draft.version,
+            revision_number=draft_rev_number,
+            name=draft.name,
+            document_type=draft.document_type,
+            tags=draft.tags,
+            summary=draft.summary,
+            applicability_type=draft.applicability_type,
+            applicability_refs=draft.applicability_refs,
+            file_ids=staging_file_ids,
+            created_by=draft.created_by,
+        ))
+    await db.flush()
 
 
 async def _publish_document(db: AsyncSession, doc: Document) -> None:
