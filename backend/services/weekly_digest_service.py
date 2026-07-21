@@ -13,7 +13,10 @@ from typing import Any
 from urllib.parse import unquote
 from urllib.request import urlopen
 
-from utils.dates import IST
+from .azure_secrets import get_secret_sync
+from core.constants import DB_NAME, DB_PORT, GENERIC_EMAIL,BASE_URL
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +47,40 @@ DIGEST_EXECUTOR = ThreadPoolExecutor(max_workers=DIGEST_MAX_WORKERS)
 AZURE_TIMER_CRON_MONDAY_7AM_IST = "0 30 1 * * 1"
 
 
-def _last_week_bounds(reference_utc: datetime | None = None) -> tuple[datetime, datetime]:
+ACS_CONNECTION_STRING = None
+SENDER_EMAIL = None
+DB_CONFIG = {}
+
+try:
+    ACS_CONNECTION_STRING = get_secret_sync("ACS-CONNECTION-STRING")
+    AZURE_STORAGE_CONNECTION_STRING = get_secret_sync("BLOB-CONNECTION-STRING")
+    AZURE_CONTAINER_NAME = "ecp"
+
+    SENDER_EMAIL = GENERIC_EMAIL
+
+    POSTGRES_USER = get_secret_sync("POSTGRES-USER")
+
+    POSTGRES_PASSWORD = get_secret_sync("POSTGRES-PASSWORD")
+
+    POSTGRES_HOST = get_secret_sync("POSTGRES-HOST")
+
+    DB_CONFIG = {
+        "host": POSTGRES_HOST,
+        "port": DB_PORT,
+        "dbname": DB_NAME,
+        "user": POSTGRES_USER,
+        "password": POSTGRES_PASSWORD,
+    }
+
+    logging.info("Credentials loaded successfully")
+
+except Exception as ex:
+    logging.error(f"FAILED to load credentials: {str(ex)}")
+
+
+def _last_week_bounds(
+    reference_utc: datetime | None = None,
+) -> tuple[datetime, datetime]:
     """Return [start, end) UTC bounds for previous week in IST."""
     now_utc = reference_utc or datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(IST)
@@ -87,15 +123,80 @@ def _event_link(base_url: str, event_id: int) -> str:
     return f"{base_url.rstrip('/')}/events/{event_id}"
 
 
-THUMBNAIL_MAX_SIZE = (560, 420)
+THUMBNAIL_MAX_SIZE = (400, 400)
 THUMBNAIL_JPEG_QUALITY = 75
-EMAIL_MAX_WIDTH = 640
-CARD_IMAGE_WIDTH = 280
-TITLE_MAX_CHARS = 72
-DESCRIPTION_MAX_CHARS = 140
+EMAIL_MAX_WIDTH = 600
+# Shared 3-col tile size (events + knowledge hub)
+TILE_IMAGE_WIDTH = 150
+TILE_IMAGE_HEIGHT = 150
+KH_DESC_MAX_CHARS = 72
+BANNER_HEIGHT = 210
+TITLE_MAX_CHARS = 32
+KH_TITLE_MAX_CHARS = 28
+KH_TAGS_MAX_CHARS = 32
+GRID_COLUMNS = 3
 
-_TEXT_WRAP_STYLE = (
-    "word-break:break-word; overflow-wrap:anywhere; hyphens:auto; max-width:100%;"
+# Popular, readable stacks (Google Fonts where clients allow them)
+_FONT_DISPLAY = "'DM Serif Display',Georgia,'Times New Roman',serif"
+_FONT_BODY = "'DM Sans','Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+_GOOGLE_FONTS_HREF = (
+    "https://fonts.googleapis.com/css2?"
+    "family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400"
+    "&family=DM+Serif+Display&display=swap"
+)
+
+# Hero banner (teal) — also used as the full-email background motif
+_BANNER_SVG_DATA_URI = (
+    "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22600%22 height=%22210%22 "
+    "viewBox=%220 0 600 210%22 preserveAspectRatio=%22xMidYMid slice%22%3E%3Cdefs%3E"
+    "%3ClinearGradient id=%22bg%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E"
+    "%3Cstop offset=%220%25%22 stop-color=%22%230B3A5C%22/%3E"
+    "%3Cstop offset=%2255%25%22 stop-color=%22%23155F8A%22/%3E"
+    "%3Cstop offset=%22100%25%22 stop-color=%22%230D8F9A%22/%3E"
+    "%3C/linearGradient%3E"
+    "%3ClinearGradient id=%22shine%22 x1=%220%22 y1=%220%22 x2=%220%22 y2=%221%22%3E"
+    "%3Cstop offset=%220%25%22 stop-color=%22%23FFFFFF%22 stop-opacity=%220.18%22/%3E"
+    "%3Cstop offset=%22100%25%22 stop-color=%22%23FFFFFF%22 stop-opacity=%220%22/%3E"
+    "%3C/linearGradient%3E"
+    "%3C/defs%3E"
+    "%3Crect width=%22600%22 height=%22210%22 fill=%22url(%23bg)%22/%3E"
+    "%3Ccircle cx=%22520%22 cy=%2230%22 r=%2290%22 fill=%22%23FFFFFF%22 fill-opacity=%220.08%22/%3E"
+    "%3Ccircle cx=%22560%22 cy=%22170%22 r=%2270%22 fill=%22%2300C2CB%22 fill-opacity=%220.22%22/%3E"
+    "%3Ccircle cx=%2240%22 cy=%22170%22 r=%2260%22 fill=%22%23FFFFFF%22 fill-opacity=%220.06%22/%3E"
+    "%3Cpath d=%22M0 148 C120 128 220 168 320 148 C420 128 500 138 600 122 L600 210 L0 210 Z%22 "
+    "fill=%22%23FFFFFF%22 fill-opacity=%220.1%22/%3E"
+    "%3Crect width=%22600%22 height=%22210%22 fill=%22url(%23shine)%22/%3E"
+    "%3C/svg%3E"
+)
+
+# Soft full-page background derived from the same banner palette (readable under dark text)
+_EMAIL_BG_SVG_DATA_URI = (
+    "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%221440%22 height=%222200%22 "
+    "viewBox=%220 0 1440 2200%22 preserveAspectRatio=%22xMidYMid slice%22%3E%3Cdefs%3E"
+    "%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E"
+    "%3Cstop offset=%220%25%22 stop-color=%22%23EAF6FB%22/%3E"
+    "%3Cstop offset=%2240%25%22 stop-color=%22%23D5EEF7%22/%3E"
+    "%3Cstop offset=%2275%25%22 stop-color=%22%23C5E6F2%22/%3E"
+    "%3Cstop offset=%22100%25%22 stop-color=%22%23B3DCEC%22/%3E"
+    "%3C/linearGradient%3E"
+    "%3CradialGradient id=%22r1%22 cx=%2215%25%22 cy=%228%25%22 r=%2245%25%22%3E"
+    "%3Cstop offset=%220%25%22 stop-color=%22%230D8F9A%22 stop-opacity=%220.18%22/%3E"
+    "%3Cstop offset=%22100%25%22 stop-color=%22%230D8F9A%22 stop-opacity=%220%22/%3E"
+    "%3C/radialGradient%3E"
+    "%3CradialGradient id=%22r2%22 cx=%2288%25%22 cy=%2222%25%22 r=%2240%25%22%3E"
+    "%3Cstop offset=%220%25%22 stop-color=%22%230B3A5C%22 stop-opacity=%220.16%22/%3E"
+    "%3Cstop offset=%22100%25%22 stop-color=%22%230B3A5C%22 stop-opacity=%220%22/%3E"
+    "%3C/radialGradient%3E"
+    "%3CradialGradient id=%22r3%22 cx=%2270%25%22 cy=%2275%25%22 r=%2250%25%22%3E"
+    "%3Cstop offset=%220%25%22 stop-color=%22%2300C2CB%22 stop-opacity=%220.14%22/%3E"
+    "%3Cstop offset=%22100%25%22 stop-color=%22%2300C2CB%22 stop-opacity=%220%22/%3E"
+    "%3C/radialGradient%3E"
+    "%3C/defs%3E"
+    "%3Crect width=%221440%22 height=%222200%22 fill=%22url(%23g)%22/%3E"
+    "%3Crect width=%221440%22 height=%222200%22 fill=%22url(%23r1)%22/%3E"
+    "%3Crect width=%221440%22 height=%222200%22 fill=%22url(%23r2)%22/%3E"
+    "%3Crect width=%221440%22 height=%222200%22 fill=%22url(%23r3)%22/%3E"
+    "%3C/svg%3E"
 )
 
 
@@ -155,37 +256,20 @@ def _resolve_blob_path(path_or_url: str, container_name: str) -> str:
         return path_or_url
 
 
-def _fetch_blob_bytes_from_azure(path_or_url: str) -> bytes | None:
+def _fetch_blob_bytes_from_azure(blob_path: str) -> bytes | None:
     """Download blob bytes from Azure using connection string (sync)."""
-    from config import settings
 
-    if not path_or_url or not str(path_or_url).strip():
+
+    if not blob_path or not str(blob_path).strip():
         return None
 
-    if getattr(settings, "BYPASS_AZURE_UPLOAD", False):
-        try:
-            import hashlib
-
-            blob_path = _resolve_blob_path(path_or_url, settings.AZURE_CONTAINER_NAME)
-            seed = hashlib.md5(blob_path.encode()).hexdigest()[:8]
-            fake_url = f"https://picsum.photos/seed/{seed}/400/300"
-            with urlopen(fake_url, timeout=15) as resp:
-                return resp.read()
-        except Exception:
-            logger.warning(
-                "Failed to fetch bypass placeholder for blob: %s",
-                path_or_url,
-                exc_info=True,
-            )
-            return None
-
-    conn_str = settings.AZURE_STORAGE_CONNECTION_STRING
-    container_name = settings.AZURE_CONTAINER_NAME
+    conn_str = AZURE_STORAGE_CONNECTION_STRING
+    container_name = AZURE_CONTAINER_NAME
     if not conn_str:
         logger.warning("AZURE_STORAGE_CONNECTION_STRING is not configured")
         return None
 
-    blob_path = _resolve_blob_path(path_or_url, container_name)
+
     try:
         blob_module = importlib.import_module("azure.storage.blob")
         blob_service_client_cls = getattr(blob_module, "BlobServiceClient")
@@ -238,9 +322,14 @@ def _fetch_files_for_ids(
     """Fetch file records from documents.files or events.files by IDs."""
     if not file_ids:
         return []
+
     placeholders = ",".join(["%s"] * len(file_ids))
+    columns = ["id", "file_type", "file_url"]
+    if schema == "events":
+        columns.append("thumbnail_url")
+
     sql = f"""
-        SELECT id, file_type, file_url, thumbnail_url
+        SELECT {', '.join(columns)}
         FROM {schema}.files
         WHERE id IN ({placeholders})
         ORDER BY sort_order ASC;
@@ -266,20 +355,6 @@ def _pick_thumbnail_source_for_document(files: list[dict[str, Any]]) -> str | No
         if _normalize_file_type(f.get("file_type")) == "IMAGE" and f.get("file_url"):
             return f["file_url"]
     return None
-
-
-def _render_card_image_html(content_id: str, alt_text: str) -> str:
-    """Email-safe fixed-size image referenced by inline CID attachment."""
-    image_height = int(CARD_IMAGE_WIDTH * 3 / 4)
-    alt = escape(_truncate_text(alt_text, 120))
-    return (
-        '<tr><td align="center" style="line-height:0; font-size:0; padding:0;">'
-        f'<img src="cid:{content_id}" width="{CARD_IMAGE_WIDTH}" height="{image_height}" '
-        f'alt="{alt}" '
-        f'style="display:block; width:100%; max-width:{CARD_IMAGE_WIDTH}px; height:auto; '
-        f'border:0; outline:none; text-decoration:none; border-radius:6px 6px 0 0;">'
-        "</td></tr>"
-    )
 
 
 def create_acs_email_client(connection_string: str) -> Any:
@@ -636,12 +711,10 @@ def build_and_send_weekly_digest_sync(
 
 async def build_and_send_weekly_digest(
     *,
-    db_config: dict[str, Any],
-    connection_string: str,
-    sender_address: str,
+
     to_addresses: list[str],
     subject: str = "Weekly Knowledge Hub and Events Digest",
-    base_url: str = "https://ecp.com",
+    base_url: str = BASE_URL,
     banner_image_url: str | None = None,
     reference_utc: datetime | None = None,
     cc_addresses: list[str] | None = None,
@@ -652,185 +725,345 @@ async def build_and_send_weekly_digest(
     return await loop.run_in_executor(
         DIGEST_EXECUTOR,
         lambda: build_and_send_weekly_digest_sync(
-            db_config=db_config,
-            connection_string=connection_string,
-            sender_address=sender_address,
+            db_config=DB_CONFIG,
+            connection_string=ACS_CONNECTION_STRING,
+            sender_address=SENDER_EMAIL,
             to_addresses=to_addresses,
             cc_addresses=cc_addresses,
             bcc_addresses=bcc_addresses,
             subject=subject,
-            base_url=base_url,
+            base_url=BASE_URL,
             banner_image_url=banner_image_url,
             reference_utc=reference_utc,
         ),
     )
 
+def _has_thumbnail(item: dict[str, Any]) -> bool:
+    return bool(item.get("thumbnail_cid"))
 
-def _render_doc_card(item: dict[str, Any]) -> str:
-    thumbnail_cid = item.get("thumbnail_cid")
-    doc_type = item.get("document_type", "")
-    is_flyer = doc_type == "FLYER"
-    tags = item.get("tags") or []
-    title = escape(_truncate_text(str(item.get("name") or ""), TITLE_MAX_CHARS))
-    title_style = (
-        f"display:block; font-size:13px; font-weight:bold; color:#111111; margin-top:6px; "
-        f"mso-line-height-rule:exactly; line-height:18px; {_TEXT_WRAP_STYLE}"
+
+def _sort_section_items(
+    items: list[dict[str, Any]],
+    *,
+    prefer_flyers: bool = False,
+) -> list[dict[str, Any]]:
+    """Image tiles first; no-image items last. Optional flyer preference among imaged docs."""
+
+    def _key(item: dict[str, Any]) -> tuple[int, int]:
+        no_image = 0 if _has_thumbnail(item) else 1
+        flyer_rank = 0
+        if prefer_flyers:
+            flyer_rank = (
+                0
+                if str(item.get("document_type") or "").upper() == "FLYER"
+                else 1
+            )
+        return (no_image, flyer_rank)
+
+    return sorted(items, key=_key)
+
+
+def _format_tags_line(tags: list[Any]) -> str:
+    cleaned = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    if not cleaned:
+        return ""
+    return _truncate_text(" · ".join(cleaned), KH_TAGS_MAX_CHARS)
+
+
+def _render_tile_image(thumbnail_cid: str | None, alt_text: str) -> str:
+    """Rounded image only (no card). Soft placeholder when missing."""
+    if thumbnail_cid:
+        alt = escape(_truncate_text(alt_text, 120))
+        return (
+            f'<img class="tile-img" src="cid:{thumbnail_cid}" width="{TILE_IMAGE_WIDTH}" '
+            f'alt="{alt}" '
+            f'style="display:block; width:100%; max-width:100%; height:auto; '
+            f"border:0; border-radius:18px; object-fit:cover;\">"
+        )
+    return (
+        f'<table role="presentation" class="tile-img-ph" width="100%" '
+        f'cellpadding="0" cellspacing="0" border="0" '
+        f'style="width:100%; max-width:100%; background-color:#D9E8F2; border-radius:18px;">'
+        f'<tr><td height="{TILE_IMAGE_HEIGHT}" style="height:{TILE_IMAGE_HEIGHT}px; '
+        f'font-size:0; line-height:0;">&nbsp;</td></tr></table>'
     )
 
-    if is_flyer and thumbnail_cid:
-        return (
-            '<table role="presentation" class="kh-card" width="100%" cellpadding="0" cellspacing="0" '
-            'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px; '
-            'table-layout:fixed; width:100%;">'
-            f'{_render_card_image_html(thumbnail_cid, str(item.get("name") or ""))}'
-            '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
-            '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
-            '<td bgcolor="#2B6CB0" style="padding:2px 8px; border-radius:3px;">'
-            f'<span style="font-size:10px; font-weight:bold; color:#ffffff; text-transform:uppercase; '
-            f'letter-spacing:0.4px;">{escape(item["document_type_label"])}</span>'
-            '</td></tr></table>'
-            f'<span style="{title_style}">{title}</span>'
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
-            '<tr><td align="right">'
-            f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
-            'font-family:Arial,Helvetica,sans-serif; font-size:16px; color:#2B6CB0; font-weight:bold; '
-            'text-decoration:none;">&rarr;</a>'
-            '</td></tr></table>'
-            '</td></tr></table>'
-        )
 
-    tag_html = ""
-    if tags:
-        tag_parts = " &middot; ".join(
-            escape(_truncate_text(str(t), 24)) for t in tags
-        )
-        tag_html = (
-            f'<span style="display:block; font-size:11px; color:#2B6CB0; margin-top:6px; '
-            f'{_TEXT_WRAP_STYLE}">{tag_parts}</span>'
-        )
-
-    description = item.get("description", "")
-    desc_html = ""
-    if description:
-        desc_html = (
-            f'<span style="display:block; font-size:12px; line-height:17px; color:#555555; '
-            f'margin-top:5px; max-height:34px; overflow:hidden; {_TEXT_WRAP_STYLE}">'
-            f'{escape(_truncate_text(str(description), DESCRIPTION_MAX_CHARS))}</span>'
-        )
+def _render_product_tile(
+    *,
+    name: str,
+    link: str,
+    thumbnail_cid: str | None,
+    alt_text: str,
+    meta_html: str = "",
+) -> str:
+    """
+    Product-grid tile: image only + text under it.
+    Text width matches image via shared fixed-layout column (Outlook-safe wrapping).
+    """
+    safe_link = escape(link)
+    image_html = _render_tile_image(thumbnail_cid, alt_text)
 
     return (
-        '<table role="presentation" class="kh-card" width="100%" cellpadding="0" cellspacing="0" '
-        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px; '
-        'table-layout:fixed; width:100%;">'
-        '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
-        '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
-        '<td bgcolor="#2B6CB0" style="padding:2px 8px; border-radius:3px;">'
-        f'<span style="font-size:10px; font-weight:bold; color:#ffffff; text-transform:uppercase; '
-        f'letter-spacing:0.4px;">{escape(item["document_type_label"])}</span>'
-        '</td></tr></table>'
-        f'<span style="{title_style}">{title}</span>'
-        f'{tag_html}'
-        f'{desc_html}'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
-        '<tr><td align="right">'
-        f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
-        'font-family:Arial,Helvetica,sans-serif; font-size:16px; color:#2B6CB0; font-weight:bold; '
-        'text-decoration:none;">&rarr;</a>'
-        '</td></tr></table>'
-        '</td></tr></table>'
+        f'<table class="product-tile" role="presentation" width="100%" '
+        f'cellpadding="0" cellspacing="0" border="0" '
+        f'style="width:100%; max-width:100%; table-layout:fixed; '
+        f'background-color:transparent; border:0;">'
+        f'<tr><td align="left" style="line-height:0; font-size:0; padding:0;">'
+        f'<a href="{safe_link}" style="text-decoration:none; border:0;">{image_html}</a>'
+        f"</td></tr>"
+        f'<tr><td align="left" valign="top" '
+        f'style="padding:10px 2px 14px 2px; font-family:{_FONT_BODY}; '
+        f'word-wrap:break-word; overflow-wrap:anywhere; word-break:break-word;">'
+        f'<a href="{safe_link}" style="text-decoration:none; color:#111111;">'
+        # <p> wraps in Outlook; span+nowrap does not
+        f'<p style="margin:0; padding:0; font-family:{_FONT_BODY}; font-size:14px; '
+        f'font-weight:700; color:#111111; line-height:18px; mso-line-height-rule:exactly;">'
+        f"{name}</p>"
+        f"{meta_html}"
+        f"</a>"
+        f"</td></tr>"
+        f"</table>"
+    )
+
+
+def _render_doc_card(item: dict[str, Any]) -> str:
+    """Knowledge Hub: name, type, tags, description (truncated except flyers)."""
+    name = escape(_truncate_text(str(item.get("name") or ""), KH_TITLE_MAX_CHARS))
+    doc_type = str(item.get("document_type") or "").upper()
+    type_label = escape(
+        str(
+            item.get("document_type_label")
+            or DOCUMENT_TYPE_LABELS.get(doc_type, doc_type)
+            or "Document"
+        )
+    )
+    tags_raw = item.get("tags") or []
+    if not isinstance(tags_raw, list):
+        tags_raw = _safe_tags(tags_raw)
+    tags_line = escape(_format_tags_line(tags_raw))
+
+    description = str(item.get("description") or "").strip()
+    if doc_type != "FLYER":
+        description = _truncate_text(description, KH_DESC_MAX_CHARS)
+    description = escape(description)
+
+    meta_parts: list[str] = []
+    if type_label:
+        meta_parts.append(
+            f'<p style="margin:4px 0 0 0; padding:0; font-family:{_FONT_BODY}; font-size:11px; '
+            f'font-weight:600; color:#0F6E8C; line-height:15px; mso-line-height-rule:exactly;">'
+            f"{type_label}</p>"
+        )
+    if tags_line:
+        meta_parts.append(
+            f'<p style="margin:3px 0 0 0; padding:0; font-family:{_FONT_BODY}; font-size:11px; '
+            f'color:#6A8499; line-height:15px; mso-line-height-rule:exactly;">'
+            f"{tags_line}</p>"
+        )
+    if description:
+        meta_parts.append(
+            f'<p style="margin:6px 0 0 0; padding:0; font-family:{_FONT_BODY}; font-size:12px; '
+            f'color:#4A5F70; line-height:17px; mso-line-height-rule:exactly; '
+            f'word-wrap:break-word; overflow-wrap:anywhere; word-break:break-word;">'
+            f"{description}</p>"
+        )
+
+    return _render_product_tile(
+        name=name,
+        link=str(item.get("link") or "#"),
+        thumbnail_cid=item.get("thumbnail_cid"),
+        alt_text=str(item.get("name") or ""),
+        meta_html="".join(meta_parts),
     )
 
 
 def _render_event_card(item: dict[str, Any]) -> str:
-    thumbnail_cid = item.get("thumbnail_cid")
-    title = escape(_truncate_text(str(item.get("name") or ""), TITLE_MAX_CHARS))
-    title_style = (
-        f"display:block; font-size:13px; font-weight:bold; color:#111111; "
-        f"mso-line-height-rule:exactly; line-height:18px; {_TEXT_WRAP_STYLE}"
+    """Events: same 3-col product tile as Knowledge Hub (image + name)."""
+    name = escape(_truncate_text(str(item.get("name") or ""), TITLE_MAX_CHARS))
+    description = escape(
+        _truncate_text(str(item.get("description") or "").strip(), KH_DESC_MAX_CHARS)
     )
-    image_html = ""
-    if thumbnail_cid:
-        image_html = _render_card_image_html(thumbnail_cid, str(item.get("name") or ""))
-
-    return (
-        '<table role="presentation" class="ev-card" width="100%" cellpadding="0" cellspacing="0" '
-        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px; '
-        'table-layout:fixed; width:100%;">'
-        f'{image_html}'
-        '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
-        f'<span style="{title_style}">{title}</span>'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
-        '<tr><td align="right">'
-        f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
-        'font-family:Arial,Helvetica,sans-serif; font-size:16px; color:#2B6CB0; font-weight:bold; '
-        'text-decoration:none;">&rarr;</a>'
-        '</td></tr></table>'
-        '</td></tr></table>'
+    meta = ""
+    if description:
+        meta = (
+            f'<p style="margin:6px 0 0 0; padding:0; font-family:{_FONT_BODY}; font-size:12px; '
+            f'color:#4A5F70; line-height:17px; mso-line-height-rule:exactly; '
+            f'word-wrap:break-word; overflow-wrap:anywhere; word-break:break-word;">'
+            f"{description}</p>"
+        )
+    return _render_product_tile(
+        name=name,
+        link=str(item.get("link") or "#"),
+        thumbnail_cid=item.get("thumbnail_cid"),
+        alt_text=str(item.get("name") or ""),
+        meta_html=meta,
     )
 
 
+def _render_n_col_grid(
+    cards: list[str],
+    *,
+    columns: int,
+    empty_message: str,
+) -> str:
+    """
+    N-column grid without gap <td>s (those cause horizontal scroll when pane shrinks).
+    Spacing uses padding only; total column % always equals 100%.
+    """
+    columns = max(1, columns)
+    widths = [100 // columns] * columns
+    widths[0] += 100 - sum(widths)
+    if not cards:
+        return (
+            f'<tr><td class="mobile-pad" style="padding:10px 12px; '
+            f'font-family:{_FONT_BODY}; font-size:13px; color:#4A6F8C;">'
+            f"{empty_message}</td></tr>"
+        )
+
+    rows_html = ""
+    for i in range(0, len(cards), columns):
+        chunk = cards[i : i + columns]
+        cells = ""
+        for idx in range(columns):
+            content = chunk[idx] if idx < len(chunk) else "&nbsp;"
+            w = widths[idx]
+            if idx == 0:
+                pad = "padding:0 6px 12px 0;"
+            elif idx == columns - 1:
+                pad = "padding:0 0 12px 6px;"
+            else:
+                pad = "padding:0 6px 12px 6px;"
+            cells += (
+                f'<td class="stack-col" width="{w}%" valign="top" '
+                f'style="width:{w}%; max-width:{w}%; {pad} '
+                f'overflow:hidden; word-wrap:break-word;">{content}</td>'
+            )
+        rows_html += (
+            '<tr><td class="mobile-pad" style="padding:4px 12px 0 12px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            'style="table-layout:fixed; width:100%; max-width:100%; border-collapse:collapse;">'
+            f"<tr>{cells}</tr></table>"
+            "</td></tr>"
+        )
+    return rows_html
 
 
 def _render_events_grid(cards: list[str]) -> str:
-    """Render event cards in a 2-column grid layout."""
-    if not cards:
-        return (
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
-            '<tr><td style="padding:20px 40px; font-family:Arial,Helvetica,sans-serif; font-size:14px; color:#A8CCE8;">'
-            'No events this week.</td></tr></table>'
-        )
-    rows_html = ""
-    for i in range(0, len(cards), 2):
-        left = cards[i]
-        right = cards[i + 1] if i + 1 < len(cards) else ""
-        right_cell = (
-            f'<td class="stack-col" valign="top" width="50%" '
-            f'style="width:50%; padding-left:8px; word-break:break-word; overflow-wrap:anywhere;">{right}</td>'
-            if right
-            else '<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;"></td>'
-        )
-        rows_html += (
-            '<tr>'
-            '<td class="mobile-pad" style="padding:10px 20px 0 20px;">'
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
-            'style="table-layout:fixed;"><tr>'
-            f'<td class="stack-col col-pad-right" valign="top" width="50%" '
-            f'style="width:50%; padding-right:8px; word-break:break-word; overflow-wrap:anywhere;">{left}</td>'
-            f'{right_cell}'
-            '</tr></table></td></tr>'
-        )
-    return rows_html
+    return _render_n_col_grid(
+        cards,
+        columns=GRID_COLUMNS,
+        empty_message="No events this week.",
+    )
 
 
 def _render_knowledge_grid(cards: list[str]) -> str:
-    """Render knowledge hub cards in a 2-column grid layout."""
-    if not cards:
-        return (
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
-            '<tr><td style="padding:20px 40px; font-family:Arial,Helvetica,sans-serif; font-size:14px; color:#A8CCE8;">'
-            'No Knowledge Hub items this week.</td></tr></table>'
-        )
-    rows_html = ""
-    for i in range(0, len(cards), 2):
-        left = cards[i]
-        right = cards[i + 1] if i + 1 < len(cards) else ""
-        right_cell = (
-            f'<td class="stack-col" valign="top" width="50%" '
-            f'style="width:50%; padding-left:8px; word-break:break-word; overflow-wrap:anywhere;">{right}</td>'
-            if right
-            else '<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;"></td>'
-        )
-        rows_html += (
-            '<tr>'
-            '<td class="mobile-pad" style="padding:10px 20px 0 20px;">'
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
-            'style="table-layout:fixed;"><tr>'
-            f'<td class="stack-col col-pad-right" valign="top" width="50%" '
-            f'style="width:50%; padding-right:8px; word-break:break-word; overflow-wrap:anywhere;">{left}</td>'
-            f'{right_cell}'
-            '</tr></table></td></tr>'
-        )
-    return rows_html
+    return _render_n_col_grid(
+        cards,
+        columns=GRID_COLUMNS,
+        empty_message="No Knowledge Hub items this week.",
+    )
+
+
+def _render_section_cta(*, cta_label: str, cta_href: str) -> str:
+    """End-of-section button-style CTA."""
+    return (
+        '<tr><td class="mobile-pad" align="center" style="padding:18px 12px 8px 12px;">'
+        f'<a href="{escape(cta_href)}" '
+        f'style="display:inline-block; font-family:{_FONT_BODY}; font-size:12px; '
+        "font-weight:700; letter-spacing:0.6px; color:#FFFFFF; text-decoration:none; "
+        "background-color:#0F6E8C; border-radius:8px; padding:11px 22px;\">"
+        f"{escape(cta_label)}"
+        "</a>"
+        "</td></tr>"
+    )
+
+
+def _render_section_heading(label: str) -> str:
+    return (
+        '<tr><td class="mobile-pad" style="padding:22px 12px 6px 12px;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'style="table-layout:fixed; width:100%;">'
+        "<tr>"
+        '<td width="4" style="width:4px; background-color:#0F6E8C; border-radius:2px; '
+        'font-size:0; line-height:0;">&nbsp;</td>'
+        f'<td style="padding-left:10px; font-family:{_FONT_DISPLAY}; font-size:20px; '
+        f'font-weight:400; color:#0F2C44; letter-spacing:0.2px; '
+        f'word-wrap:break-word;">{escape(label)}</td>'
+        "</tr></table>"
+        "</td></tr>"
+    )
+
+
+def _render_banner_block(
+    *,
+    banner_src: str | None,
+    period_display: str,
+    root_url: str,
+) -> str:
+    """Hero banner with each text line in its own table row (Outlook wraps correctly)."""
+    bg_src = (banner_src or "").strip() or _BANNER_SVG_DATA_URI
+    safe_bg = escape(bg_src, quote=True)
+
+    return f"""<!-- BANNER (text overlaid; one row per line for Outlook) -->
+<tr>
+<td class="banner-cell" align="center" background="{safe_bg}"
+style="background-color:#0B3A5C; background-image:url('{safe_bg}');
+background-size:cover; background-position:center center; background-repeat:no-repeat;">
+<!--[if mso]>
+<v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false"
+ style="width:{EMAIL_MAX_WIDTH}px; height:{BANNER_HEIGHT}px;">
+<v:fill type="frame" src="{safe_bg}" color="#0B3A5C"/>
+<v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true">
+<![endif]-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+style="width:100%; max-width:100%; table-layout:fixed;">
+<tr>
+<td align="center" valign="middle" style="padding:36px 16px 38px 16px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+style="max-width:100%; table-layout:fixed;">
+<tr>
+<td align="center" class="banner-kicker"
+style="font-family:{_FONT_BODY}; font-size:11px; font-weight:700;
+letter-spacing:1.4px; text-transform:uppercase; color:#A8E4EA;
+mso-line-height-rule:exactly; line-height:16px; padding-bottom:8px;">
+Your weekly roundup
+</td>
+</tr>
+<tr>
+<td align="center" class="banner-title"
+style="font-family:{_FONT_DISPLAY}; font-size:26px; font-weight:400;
+color:#FFFFFF; mso-line-height-rule:exactly; line-height:32px; padding-bottom:8px;
+word-wrap:break-word;">
+Events &amp; Knowledge Hub
+</td>
+</tr>
+<tr>
+<td align="center" class="banner-subtitle"
+style="font-family:{_FONT_BODY}; font-size:13px; color:#D2EAF2;
+mso-line-height-rule:exactly; line-height:19px; padding-bottom:16px;
+word-wrap:break-word;">
+{period_display}
+</td>
+</tr>
+<tr>
+<td align="center">
+<a href="{escape(root_url)}"
+style="display:inline-block; font-family:{_FONT_BODY}; font-size:12px;
+font-weight:700; letter-spacing:0.4px; color:#0B3A5C; text-decoration:none;
+background-color:#FFFFFF; border-radius:8px; padding:10px 20px;">Open portal</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+<!--[if mso]>
+</v:textbox>
+</v:rect>
+<![endif]-->
+</td>
+</tr>"""
 
 
 def build_weekly_digest_html(
@@ -839,8 +1072,11 @@ def build_weekly_digest_html(
     banner_image_url: str | None = None,
 ) -> str:
     """Build Outlook-safe HTML digest from the weekly payload."""
-    knowledge_hub = list(payload.get("knowledge_hub") or [])
-    events = list(payload.get("events") or [])
+    knowledge_hub = _sort_section_items(
+        list(payload.get("knowledge_hub") or []),
+        prefer_flyers=True,
+    )
+    events = _sort_section_items(list(payload.get("events") or []))
 
     period_label = _truncate_text(
         payload["period"].get("label", "") if payload and payload.get("period") else "",
@@ -853,15 +1089,43 @@ def build_weekly_digest_html(
     events_grid = _render_events_grid(event_cards)
     knowledge_grid = _render_knowledge_grid(knowledge_cards)
 
+    period_display = escape(period_label) if period_label else "this week"
+    root_url = str(BASE_URL or "https://ecp.com").rstrip("/")
+    events_cta = f"{root_url}/events"
+    documents_cta = root_url
+
+    banner_src = (banner_image_url or "").strip() or None
+    banner_block = _render_banner_block(
+        banner_src=banner_src,
+        period_display=period_display,
+        root_url=root_url,
+    )
+
+    events_heading = _render_section_heading("This Week's Events")
+    knowledge_heading = _render_section_heading("Knowledge Hub")
+
+    events_end_cta = _render_section_cta(
+        cta_label="VIEW ALL EVENTS",
+        cta_href=events_cta,
+    )
+    documents_end_cta = _render_section_cta(
+        cta_label="VIEW ALL DOCUMENTS",
+        cta_href=documents_cta,
+    )
+
     return f"""<!DOCTYPE html>
-<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" style="width:100%; max-width:100%; overflow-x:hidden;">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting">
 <meta name="color-scheme" content="light dark">
 <meta name="supported-color-schemes" content="light dark">
 <title>MSIL Compliance Weekly Digest</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="{_GOOGLE_FONTS_HREF}" rel="stylesheet">
 <!--[if mso]>
 <noscript>
 <xml>
@@ -876,110 +1140,87 @@ td, th, div, p, a, h1, h2, h3 {{font-family: Arial, Helvetica, sans-serif;}}
 </style>
 <![endif]-->
 <style>
+  html, body {{ width: 100% !important; max-width: 100% !important; overflow-x: hidden !important; margin: 0 !important; padding: 0 !important; }}
   body, table, td, a {{ -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }}
-  table, td {{ mso-table-lspace: 0pt; mso-table-rspace: 0pt; }}
-  img {{ -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; max-width: 100%; }}
+  table, td {{ mso-table-lspace: 0pt; mso-table-rspace: 0pt; border-collapse: collapse; }}
+  img {{ -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; max-width: 100% !important; }}
   body {{ margin: 0; padding: 0; width: 100% !important; height: 100% !important; }}
+  p {{ margin: 0; padding: 0; }}
   a {{ text-decoration: none; }}
-  .arrow-link:hover {{ opacity: 0.7; }}
-  .ev-card:hover, .kh-card:hover {{ box-shadow: 0 4px 16px rgba(0,50,120,0.15); }}
-  @media screen and (max-width: 680px) {{
+  .email-outer {{ width: 100% !important; max-width: 100% !important; overflow-x: hidden !important; }}
+  .email-wrapper {{ width: 100% !important; max-width: {EMAIL_MAX_WIDTH}px !important; }}
+  .banner-cell {{
+    background-size: cover !important;
+    background-position: center center !important;
+    background-repeat: no-repeat !important;
+  }}
+  .product-tile {{ width: 100% !important; max-width: 100% !important; table-layout: fixed !important; }}
+  .tile-img, .tile-img-ph {{ width: 100% !important; max-width: 100% !important; height: auto !important; display: block !important; }}
+  .stack-col {{ overflow: hidden !important; word-wrap: break-word !important; }}
+  @media screen and (max-width: 620px) {{
     .email-wrapper {{ width: 100% !important; max-width: 100% !important; }}
-    .stack-col {{ display: block !important; width: 100% !important; max-width: 100% !important; }}
-    .col-pad-right {{ padding-right: 0 !important; padding-bottom: 12px !important; }}
-    .mobile-pad {{ padding-left: 16px !important; padding-right: 16px !important; }}
-    .banner-title {{ font-size: 24px !important; line-height: 30px !important; }}
-    .banner-cell {{ padding: 36px 20px 40px 20px !important; }}
+    .stack-col {{ display: block !important; width: 100% !important; max-width: 100% !important; padding-left: 0 !important; padding-right: 0 !important; }}
+    .mobile-pad {{ padding-left: 12px !important; padding-right: 12px !important; }}
+    .banner-title {{ font-size: 22px !important; line-height:28px !important; }}
+    .banner-subtitle {{ font-size: 12px !important; line-height:18px !important; }}
+    .banner-cell {{ padding: 28px 14px 30px 14px !important; }}
   }}
 </style>
 </head>
-<body style="margin:0; padding:0; -webkit-font-smoothing:antialiased; background-color:#0B1D3A;">
+<body style="margin:0; padding:0; width:100%; max-width:100%; overflow-x:hidden; -webkit-font-smoothing:antialiased; background-color:#D5EEF7; background-image:url('{_EMAIL_BG_SVG_DATA_URI}'); background-size:cover; background-position:center top; background-repeat:no-repeat;">
 
-<div style="display:none; max-height:0; overflow:hidden; mso-hide:all; font-size:1px; line-height:1px; color:#0B1D3A;">
-Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
+<!-- Preheader -->
+<div style="display:none; max-height:0; overflow:hidden; mso-hide:all; font-size:1px; line-height:1px; color:#D5EEF7;">
+Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
 </div>
 
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0B1D3A" style="width:100%; background-color:#0B1D3A;">
-<tr>
-<td align="center" valign="top" style="padding:0;">
-
-<table role="presentation" class="email-wrapper" width="{EMAIL_MAX_WIDTH}" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:{EMAIL_MAX_WIDTH}px; min-width:0;">
-
-<!-- BANNER -->
-<tr>
-<td bgcolor="#0D2240" style="background-color:#0D2240; line-height:0;">
 <!--[if mso]>
-<v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:{EMAIL_MAX_WIDTH}px; height:140px;">
-<v:fill type="gradient" color="#0D2240" color2="#1A4080"/>
-<v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true">
+<v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">
+<v:fill type="frame" src="{_EMAIL_BG_SVG_DATA_URI}" color="#D5EEF7"/>
+</v:background>
 <![endif]-->
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#1A4A8A" style="background-color:#1A4A8A;">
-<tr>
-<td class="banner-cell" align="center" bgcolor="#1A4A8A" style="padding:44px 24px 48px 24px; background-color:#1A4A8A;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
-<tr>
-<td align="center" style="font-family:Arial,Helvetica,sans-serif; {_TEXT_WRAP_STYLE}">
-<span class="banner-title" style="display:block; font-size:30px; font-weight:bold; color:#ffffff; letter-spacing:0.5px; mso-line-height-rule:exactly; line-height:36px; {_TEXT_WRAP_STYLE}">MSIL Compliance Weekly Digest</span>
-<span style="display:block; font-size:13px; color:#A8CCE8; margin-top:8px; letter-spacing:0.3px; mso-line-height-rule:exactly; line-height:18px; {_TEXT_WRAP_STYLE}">Events &amp; Knowledge Hub updates &mdash; {escape(period_label) if period_label else "this week"}</span>
-</td>
-</tr>
-</table>
-</td>
-</tr>
-</table>
-<!--[if mso]>
-</v:textbox>
-</v:rect>
-<![endif]-->
-</td>
-</tr>
 
-<!-- EVENTS SECTION HEADING -->
+<table role="presentation" class="email-outer" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:100%; table-layout:fixed; background-color:transparent;">
 <tr>
-<td class="mobile-pad" bgcolor="#0B1D3A" style="padding:24px 20px 6px 20px; background-color:#0B1D3A;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-<tr>
-<td style="padding-bottom:4px;">
-<span style="font-family:Arial,Helvetica,sans-serif; font-size:18px; font-weight:bold; color:#ffffff; letter-spacing:0.5px;">This Week's Events</span>
-</td>
-</tr>
-</table>
-</td>
-</tr>
+<td align="center" valign="top" style="padding:12px 0 20px 0;">
+
+<!--[if mso]>
+<table role="presentation" width="{EMAIL_MAX_WIDTH}" cellpadding="0" cellspacing="0" border="0" align="center"><tr><td>
+<![endif]-->
+<table role="presentation" class="email-wrapper" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:{EMAIL_MAX_WIDTH}px; table-layout:fixed; background-color:#F7FBFD; border:1px solid #D0E4EF; border-radius:14px; overflow:hidden;">
+
+{banner_block}
+
+{events_heading}
 
 <!-- EVENTS GRID -->
 {events_grid}
 
-<!-- SPACER -->
-<tr><td bgcolor="#0B1D3A" style="padding:12px 0 0 0; font-size:1px; line-height:1px; background-color:#0B1D3A;">&nbsp;</td></tr>
+<!-- VIEW EVENTS CTA -->
+{events_end_cta}
 
-<!-- KNOWLEDGE HUB SECTION HEADING -->
-<tr>
-<td class="mobile-pad" bgcolor="#0B1D3A" style="padding:8px 20px 6px 20px; background-color:#0B1D3A;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-<tr>
-<td style="padding-bottom:4px;">
-<span style="font-family:Arial,Helvetica,sans-serif; font-size:18px; font-weight:bold; color:#ffffff; letter-spacing:0.5px;">Knowledge Hub</span>
-</td>
-</tr>
-</table>
-</td>
-</tr>
+<!-- SPACER -->
+<tr><td style="padding:10px 0 0 0; font-size:1px; line-height:1px;">&nbsp;</td></tr>
+
+{knowledge_heading}
 
 <!-- KNOWLEDGE HUB GRID -->
 {knowledge_grid}
 
+<!-- VIEW DOCUMENTS CTA -->
+{documents_end_cta}
+
 <!-- FOOTER -->
 <tr>
-<td class="mobile-pad" bgcolor="#0B1D3A" style="padding:24px 20px 28px 20px; background-color:#0B1D3A;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+<td style="padding:28px 12px 24px 12px; background-color:#FFFFFF; border-top:1px solid #D7E6F0;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed; width:100%;">
 <tr>
-<td style="border-top:1px solid rgba(255,255,255,0.15); padding-top:20px; font-family:Arial,Helvetica,sans-serif; {_TEXT_WRAP_STYLE}">
-<span style="display:block; font-size:14px; color:#ffffff; padding-bottom:10px;">Regards,<br><strong>Compliance Team</strong></span>
-<span style="display:block; font-size:11px; line-height:18px; color:#6A8EAE; {_TEXT_WRAP_STYLE}">
+<td style="font-family:{_FONT_BODY}; word-wrap:break-word;">
+<p style="margin:0 0 10px 0; padding:0; font-size:14px; color:#0F2C44; line-height:20px;">Regards,<br><strong>Compliance Team</strong></p>
+<p style="margin:0; padding:0; font-size:11px; line-height:18px; color:#4A6F8C;">
 This is a weekly digest sent to all employees. You are receiving this because you are part of the organization&rsquo;s distribution list.<br>
 MSIL Corporate Office, Compliance Division
-</span>
+</p>
 </td>
 </tr>
 </table>
@@ -987,6 +1228,10 @@ MSIL Corporate Office, Compliance Division
 </tr>
 
 </table>
+<!--[if mso]>
+</td></tr></table>
+<![endif]-->
+
 </td>
 </tr>
 </table>
