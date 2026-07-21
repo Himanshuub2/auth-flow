@@ -87,8 +87,40 @@ def _event_link(base_url: str, event_id: int) -> str:
     return f"{base_url.rstrip('/')}/events/{event_id}"
 
 
-THUMBNAIL_MAX_SIZE = (300, 225)  # 4:3 aspect, fits email grid nicely
-THUMBNAIL_JPEG_QUALITY = 60
+THUMBNAIL_MAX_SIZE = (560, 420)
+THUMBNAIL_JPEG_QUALITY = 75
+EMAIL_MAX_WIDTH = 640
+CARD_IMAGE_WIDTH = 280
+TITLE_MAX_CHARS = 72
+DESCRIPTION_MAX_CHARS = 140
+
+_TEXT_WRAP_STYLE = (
+    "word-break:break-word; overflow-wrap:anywhere; hyphens:auto; max-width:100%;"
+)
+
+
+def _truncate_text(text: str, max_len: int) -> str:
+    cleaned = str(text or "").strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[: max_len - 1].rstrip() + "…"
+
+
+def _thumbnail_content_id(prefix: str, item_id: int) -> str:
+    return f"digest-{prefix}-{item_id}"
+
+
+def _inline_attachment(content_id: str, jpeg_bytes: bytes) -> dict[str, str]:
+    return {
+        "name": f"{content_id}.jpg",
+        "contentType": "image/jpeg",
+        "contentInBase64": base64.b64encode(jpeg_bytes).decode("ascii"),
+        "contentId": content_id,
+    }
+
+
+def _normalize_file_type(raw: Any) -> str:
+    return str(raw or "").strip().upper()
 
 
 def _parse_file_ids(raw: Any) -> list[int]:
@@ -170,8 +202,8 @@ def _fetch_blob_bytes_from_azure(path_or_url: str) -> bytes | None:
         return None
 
 
-def _compress_image_to_base64(image_bytes: bytes) -> str:
-    """Compress image bytes to a JPEG thumbnail and return base64 data URI."""
+def _compress_image_to_jpeg_bytes(image_bytes: bytes) -> bytes:
+    """Resize and compress image bytes to JPEG for email inline attachments."""
     from PIL import Image
 
     img = Image.open(io.BytesIO(image_bytes))
@@ -179,17 +211,16 @@ def _compress_image_to_base64(image_bytes: bytes) -> str:
     img.thumbnail(THUMBNAIL_MAX_SIZE, Image.LANCZOS)
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY, optimize=True)
-    b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{b64}"
+    return buffer.getvalue()
 
 
-def _fetch_and_compress_blob(path_or_url: str) -> str | None:
-    """Fetch blob from Azure and compress to base64 thumbnail."""
+def _fetch_and_compress_blob(path_or_url: str) -> bytes | None:
+    """Fetch blob from Azure and return compressed JPEG bytes."""
     image_bytes = _fetch_blob_bytes_from_azure(path_or_url)
     if not image_bytes:
         return None
     try:
-        return _compress_image_to_base64(image_bytes)
+        return _compress_image_to_jpeg_bytes(image_bytes)
     except Exception:
         logger.warning(
             "Failed to compress blob image: %s",
@@ -221,10 +252,10 @@ def _fetch_files_for_ids(
 def _pick_thumbnail_source_for_event(files: list[dict[str, Any]]) -> str | None:
     """Pick blob path/URL for an event card: prefer IMAGE, fallback to video thumbnail."""
     for f in files:
-        if f["file_type"] == "IMAGE" and f.get("file_url"):
+        if _normalize_file_type(f.get("file_type")) == "IMAGE" and f.get("file_url"):
             return f["file_url"]
     for f in files:
-        if f["file_type"] == "VIDEO" and f.get("thumbnail_url"):
+        if _normalize_file_type(f.get("file_type")) == "VIDEO" and f.get("thumbnail_url"):
             return f["thumbnail_url"]
     return None
 
@@ -232,9 +263,23 @@ def _pick_thumbnail_source_for_event(files: list[dict[str, Any]]) -> str | None:
 def _pick_thumbnail_source_for_document(files: list[dict[str, Any]]) -> str | None:
     """Pick blob path/URL for a flyer document card."""
     for f in files:
-        if f["file_type"] == "IMAGE" and f.get("file_url"):
+        if _normalize_file_type(f.get("file_type")) == "IMAGE" and f.get("file_url"):
             return f["file_url"]
     return None
+
+
+def _render_card_image_html(content_id: str, alt_text: str) -> str:
+    """Email-safe fixed-size image referenced by inline CID attachment."""
+    image_height = int(CARD_IMAGE_WIDTH * 3 / 4)
+    alt = escape(_truncate_text(alt_text, 120))
+    return (
+        '<tr><td align="center" style="line-height:0; font-size:0; padding:0;">'
+        f'<img src="cid:{content_id}" width="{CARD_IMAGE_WIDTH}" height="{image_height}" '
+        f'alt="{alt}" '
+        f'style="display:block; width:100%; max-width:{CARD_IMAGE_WIDTH}px; height:auto; '
+        f'border:0; outline:none; text-decoration:none; border-radius:6px 6px 0 0;">'
+        "</td></tr>"
+    )
 
 
 def create_acs_email_client(connection_string: str) -> Any:
@@ -283,9 +328,11 @@ def _build_payload_from_rows(
     base_url: str,
     doc_file_map: dict[int, str | None] | None = None,
     event_file_map: dict[int, str | None] | None = None,
+    inline_attachments: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     doc_file_map = doc_file_map or {}
     event_file_map = event_file_map or {}
+    inline_attachments = inline_attachments or []
 
     documents: list[dict[str, Any]] = []
     for row in doc_rows:
@@ -294,7 +341,7 @@ def _build_payload_from_rows(
             continue
         tags = _safe_tags(row["tags"])[:3]
         doc_id = int(row["document_id"])
-        thumbnail_b64 = doc_file_map.get(doc_id) if doc_type == "FLYER" else None
+        thumbnail_cid = doc_file_map.get(doc_id) if doc_type == "FLYER" else None
         documents.append(
             {
                 "id": doc_id,
@@ -306,7 +353,7 @@ def _build_payload_from_rows(
                 "tags": tags,
                 "link": _doc_link(base_url, doc_type, doc_id),
                 "created_at_utc": row["created_at"].isoformat() if row["created_at"] else None,
-                "thumbnail_base64": thumbnail_b64,
+                "thumbnail_cid": thumbnail_cid,
             }
         )
 
@@ -321,7 +368,7 @@ def _build_payload_from_rows(
                 "heading": "New Event(s) added",
                 "link": _event_link(base_url, event_id),
                 "created_at_utc": row["created_at"].isoformat() if row["created_at"] else None,
-                "thumbnail_base64": event_file_map.get(event_id),
+                "thumbnail_cid": event_file_map.get(event_id),
             }
         )
 
@@ -340,6 +387,7 @@ def _build_payload_from_rows(
         },
         "knowledge_hub": documents,
         "events": events,
+        "inline_attachments": inline_attachments,
         "counts": {
             "knowledge_hub": len(documents),
             "events": len(events),
@@ -437,6 +485,7 @@ def build_weekly_digest_payload_sync(
 
             # Fetch file thumbnails for flyer documents
             doc_file_map: dict[int, str | None] = {}
+            inline_attachments: list[dict[str, str]] = []
             for row in doc_rows:
                 doc_type = str(row["document_type"])
                 if doc_type != "FLYER":
@@ -446,8 +495,15 @@ def build_weekly_digest_payload_sync(
                     continue
                 files = _fetch_files_for_ids(cur, file_ids, "documents")
                 blob_source = _pick_thumbnail_source_for_document(files)
-                if blob_source:
-                    doc_file_map[int(row["document_id"])] = _fetch_and_compress_blob(blob_source)
+                if not blob_source:
+                    continue
+                jpeg_bytes = _fetch_and_compress_blob(blob_source)
+                if not jpeg_bytes:
+                    continue
+                doc_id = int(row["document_id"])
+                content_id = _thumbnail_content_id("doc", doc_id)
+                doc_file_map[doc_id] = content_id
+                inline_attachments.append(_inline_attachment(content_id, jpeg_bytes))
 
             # Fetch file thumbnails for events
             event_file_map: dict[int, str | None] = {}
@@ -457,8 +513,15 @@ def build_weekly_digest_payload_sync(
                     continue
                 files = _fetch_files_for_ids(cur, file_ids, "events")
                 blob_source = _pick_thumbnail_source_for_event(files)
-                if blob_source:
-                    event_file_map[int(row["event_id"])] = _fetch_and_compress_blob(blob_source)
+                if not blob_source:
+                    continue
+                jpeg_bytes = _fetch_and_compress_blob(blob_source)
+                if not jpeg_bytes:
+                    continue
+                event_id = int(row["event_id"])
+                content_id = _thumbnail_content_id("event", event_id)
+                event_file_map[event_id] = content_id
+                inline_attachments.append(_inline_attachment(content_id, jpeg_bytes))
 
     return _build_payload_from_rows(
         doc_rows,
@@ -468,6 +531,7 @@ def build_weekly_digest_payload_sync(
         base_url=base_url,
         doc_file_map=doc_file_map,
         event_file_map=event_file_map,
+        inline_attachments=inline_attachments,
     )
 
 
@@ -499,6 +563,7 @@ def send_html_email_via_acs(
     plain_text: str | None = None,
     cc_addresses: list[str] | None = None,
     bcc_addresses: list[str] | None = None,
+    inline_attachments: list[dict[str, str]] | None = None,
 ) -> Any:
     """
     Send HTML email through Azure Communication Services Email.
@@ -506,7 +571,7 @@ def send_html_email_via_acs(
     Returns the ACS send result from poller.result().
     """
     client = create_acs_email_client(connection_string)
-    message = {
+    message: dict[str, Any] = {
         "senderAddress": sender_address,
         "recipients": {
             "to": _normalize_recipients(to_addresses),
@@ -519,6 +584,8 @@ def send_html_email_via_acs(
             "html": html_content,
         },
     }
+    if inline_attachments:
+        message["attachments"] = inline_attachments
     poller = client.begin_send(message)
     return poller.result()
 
@@ -535,13 +602,8 @@ def build_and_send_weekly_digest_sync(
     reference_utc: datetime | None = None,
     cc_addresses: list[str] | None = None,
     bcc_addresses: list[str] | None = None,
-    use_sample_data: bool = True,
 ) -> dict[str, Any]:
-    """
-    Build weekly digest payload + HTML, then send via ACS (sync flow).
-
-    Set use_sample_data=False to render real DB payload instead of demo cards.
-    """
+    """Build weekly digest payload + HTML, then send via ACS (sync flow)."""
     payload = build_weekly_digest_payload_sync(
         db_config,
         reference_utc=reference_utc,
@@ -550,7 +612,6 @@ def build_and_send_weekly_digest_sync(
     html = build_weekly_digest_html(
         payload,
         banner_image_url=banner_image_url,
-        use_sample_data=use_sample_data,
     )
     send_result = send_html_email_via_acs(
         connection_string=connection_string,
@@ -560,6 +621,7 @@ def build_and_send_weekly_digest_sync(
         bcc_addresses=bcc_addresses,
         subject=subject,
         html_content=html,
+        inline_attachments=list(payload.get("inline_attachments") or []),
         plain_text=(
             "Weekly Knowledge Hub and Events digest is available. "
             "Please review the latest highlights."
@@ -584,13 +646,8 @@ async def build_and_send_weekly_digest(
     reference_utc: datetime | None = None,
     cc_addresses: list[str] | None = None,
     bcc_addresses: list[str] | None = None,
-    use_sample_data: bool = True,
 ) -> dict[str, Any]:
-    """
-    Async wrapper for sync build+send flow using ThreadPoolExecutor(max_workers=10).
-
-    Set use_sample_data=False to render real DB payload instead of demo cards.
-    """
+    """Async wrapper for sync build+send flow using ThreadPoolExecutor(max_workers=10)."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         DIGEST_EXECUTOR,
@@ -605,35 +662,34 @@ async def build_and_send_weekly_digest(
             base_url=base_url,
             banner_image_url=banner_image_url,
             reference_utc=reference_utc,
-            use_sample_data=use_sample_data,
         ),
     )
 
 
 def _render_doc_card(item: dict[str, Any]) -> str:
-    thumbnail = item.get("thumbnail_base64")
+    thumbnail_cid = item.get("thumbnail_cid")
     doc_type = item.get("document_type", "")
     is_flyer = doc_type == "FLYER"
     tags = item.get("tags") or []
+    title = escape(_truncate_text(str(item.get("name") or ""), TITLE_MAX_CHARS))
+    title_style = (
+        f"display:block; font-size:13px; font-weight:bold; color:#111111; margin-top:6px; "
+        f"mso-line-height-rule:exactly; line-height:18px; {_TEXT_WRAP_STYLE}"
+    )
 
-    if is_flyer and thumbnail:
-        # Flyer card: image + name + arrow link (same layout as event cards)
+    if is_flyer and thumbnail_cid:
         return (
             '<table role="presentation" class="kh-card" width="100%" cellpadding="0" cellspacing="0" '
-            'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px;">'
-            '<tr><td style="line-height:0;">'
-            f'<img src="{thumbnail}" width="100%" alt="{escape(item["name"])}" '
-            'style="display:block; width:100%; height:auto; aspect-ratio:4/3; '
-            'object-fit:cover; border-radius:6px 6px 0 0;">'
-            '</td></tr>'
+            'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px; '
+            'table-layout:fixed; width:100%;">'
+            f'{_render_card_image_html(thumbnail_cid, str(item.get("name") or ""))}'
             '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
             '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
             '<td bgcolor="#2B6CB0" style="padding:2px 8px; border-radius:3px;">'
             f'<span style="font-size:10px; font-weight:bold; color:#ffffff; text-transform:uppercase; '
             f'letter-spacing:0.4px;">{escape(item["document_type_label"])}</span>'
             '</td></tr></table>'
-            f'<span style="display:block; font-size:13px; font-weight:bold; color:#111111; margin-top:6px; '
-            f'mso-line-height-rule:exactly; line-height:18px; overflow:hidden;">{escape(item["name"])}</span>'
+            f'<span style="{title_style}">{title}</span>'
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
             '<tr><td align="right">'
             f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
@@ -643,13 +699,14 @@ def _render_doc_card(item: dict[str, Any]) -> str:
             '</td></tr></table>'
         )
 
-    # Non-flyer card: text-only with type badge, name, tags, description, link
     tag_html = ""
     if tags:
-        tag_parts = " &middot; ".join(escape(str(t)) for t in tags)
+        tag_parts = " &middot; ".join(
+            escape(_truncate_text(str(t), 24)) for t in tags
+        )
         tag_html = (
             f'<span style="display:block; font-size:11px; color:#2B6CB0; margin-top:6px; '
-            f'overflow:hidden;">{tag_parts}</span>'
+            f'{_TEXT_WRAP_STYLE}">{tag_parts}</span>'
         )
 
     description = item.get("description", "")
@@ -657,20 +714,21 @@ def _render_doc_card(item: dict[str, Any]) -> str:
     if description:
         desc_html = (
             f'<span style="display:block; font-size:12px; line-height:17px; color:#555555; '
-            f'margin-top:5px; overflow:hidden; max-height:34px;">{escape(description)}</span>'
+            f'margin-top:5px; max-height:34px; overflow:hidden; {_TEXT_WRAP_STYLE}">'
+            f'{escape(_truncate_text(str(description), DESCRIPTION_MAX_CHARS))}</span>'
         )
 
     return (
         '<table role="presentation" class="kh-card" width="100%" cellpadding="0" cellspacing="0" '
-        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px;">'
+        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px; '
+        'table-layout:fixed; width:100%;">'
         '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
         '<td bgcolor="#2B6CB0" style="padding:2px 8px; border-radius:3px;">'
         f'<span style="font-size:10px; font-weight:bold; color:#ffffff; text-transform:uppercase; '
         f'letter-spacing:0.4px;">{escape(item["document_type_label"])}</span>'
         '</td></tr></table>'
-        f'<span style="display:block; font-size:13px; font-weight:bold; color:#111111; margin-top:6px; '
-        f'mso-line-height-rule:exactly; line-height:18px; overflow:hidden;">{escape(item["name"])}</span>'
+        f'<span style="{title_style}">{title}</span>'
         f'{tag_html}'
         f'{desc_html}'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
@@ -684,24 +742,23 @@ def _render_doc_card(item: dict[str, Any]) -> str:
 
 
 def _render_event_card(item: dict[str, Any]) -> str:
-    thumbnail = item.get("thumbnail_base64")
+    thumbnail_cid = item.get("thumbnail_cid")
+    title = escape(_truncate_text(str(item.get("name") or ""), TITLE_MAX_CHARS))
+    title_style = (
+        f"display:block; font-size:13px; font-weight:bold; color:#111111; "
+        f"mso-line-height-rule:exactly; line-height:18px; {_TEXT_WRAP_STYLE}"
+    )
     image_html = ""
-    if thumbnail:
-        image_html = (
-            '<tr><td style="line-height:0;">'
-            f'<img src="{thumbnail}" width="100%" alt="{escape(item["name"])}" '
-            'style="display:block; width:100%; height:auto; aspect-ratio:4/3; '
-            'object-fit:cover; border-radius:6px 6px 0 0;">'
-            '</td></tr>'
-        )
+    if thumbnail_cid:
+        image_html = _render_card_image_html(thumbnail_cid, str(item.get("name") or ""))
 
     return (
         '<table role="presentation" class="ev-card" width="100%" cellpadding="0" cellspacing="0" '
-        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px;">'
+        'border="0" style="background-color:#ffffff; border:1px solid #E0E8F0; border-radius:6px; '
+        'table-layout:fixed; width:100%;">'
         f'{image_html}'
         '<tr><td style="padding:8px 10px 10px 10px; font-family:Arial,Helvetica,sans-serif;">'
-        f'<span style="display:block; font-size:13px; font-weight:bold; color:#111111; '
-        f'mso-line-height-rule:exactly; line-height:18px; overflow:hidden;">{escape(item["name"])}</span>'
+        f'<span style="{title_style}">{title}</span>'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">'
         '<tr><td align="right">'
         f'<a href="{escape(item["link"])}" class="arrow-link" style="display:inline-block; '
@@ -712,115 +769,6 @@ def _render_event_card(item: dict[str, Any]) -> str:
     )
 
 
-
-
-def _sample_digest_items() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Demo Knowledge Hub + Events cards for HTML preview / local testing."""
-    sample_knowledge_hub = [
-        {
-            "heading": "New flyer available",
-            "name": "Critical Third-Party Cyber Risk Awareness Flyer for Multi-Entity Compliance and Continuous Monitoring Excellence",
-            "document_type": "FLYER",
-            "document_type_label": "Flyer",
-            "description": "A detailed communication flyer explaining cross-functional due diligence, escalation protocols, and continuous observation requirements for high-risk third-party onboarding and lifecycle governance.",
-            "tags": ["Cyber Risk", "Third Party", "Awareness"],
-            "link": "https://ecp.com/flyer/1001",
-            "thumbnail_base64": None,
-            "_index": 0,
-        },
-        {
-            "heading": "New Policy, Law regulation available",
-            "name": "Enterprise Policy on Data Protection, Consent Governance, and Cross-Border Information Processing Controls",
-            "document_type": "POLICY",
-            "document_type_label": "Policy",
-            "description": "This policy defines long-form obligations for teams handling personally identifiable data, mandatory retention boundaries, internal approval controls, and legal review checkpoints.",
-            "tags": ["Data Privacy", "Policy", "Governance"],
-            "link": "https://ecp.com/policy/1002",
-            "thumbnail_base64": None,
-            "_index": 1,
-        },
-        {
-            "heading": "New training material available",
-            "name": "Advanced Training Material for Regulatory Reporting Accuracy, Audit Readiness, and Exception Handling Procedures",
-            "document_type": "TRAINING_MATERIAL",
-            "document_type_label": "Training Material",
-            "description": "Comprehensive training content covering scenario-based reporting practices, validation workflows, and long-text guidance for correcting filing exceptions without timeline slippage.",
-            "tags": ["Training", "Reporting", "Audit"],
-            "link": "https://ecp.com/training_material/1003",
-            "thumbnail_base64": None,
-            "_index": 2,
-        },
-        {
-            "heading": "New Policy, Law regulation available",
-            "name": "Updated Anti-Bribery and Conflict-of-Interest Policy for Vendor Engagement, Entertainment, and Hospitality Disclosures",
-            "document_type": "POLICY",
-            "document_type_label": "Policy",
-            "description": "A practical policy update that clarifies declaration thresholds, investigative responsibilities, and periodic attestation requirements across procurement and business support functions.",
-            "tags": ["Ethics", "Policy", "Vendors"],
-            "link": "https://ecp.com/policy/1004",
-            "thumbnail_base64": None,
-            "_index": 3,
-        },
-        {
-            "heading": "New flyer available",
-            "name": "Information Security Incident Reporting Flyer for Rapid Internal Notification and Coordinated Compliance Response",
-            "document_type": "FLYER",
-            "document_type_label": "Flyer",
-            "description": "An operational flyer that lists immediate reporting channels, evidence preservation reminders, and communication checkpoints to support timely legal and compliance intervention.",
-            "tags": ["Incident", "Security", "Response"],
-            "link": "https://ecp.com/flyer/1005",
-            "thumbnail_base64": None,
-            "_index": 4,
-        },
-    ]
-    sample_events = [
-        {
-            "name": "Compliance Townhall on Emerging Regulatory Trends, Supervisory Expectations, and Cross-Border Governance Preparedness",
-            "description": "A broad leadership session to discuss major regulatory developments, practical controls alignment, and sustained evidence practices for internal and external stakeholder confidence.",
-            "link": "https://ecp.com/events/2001",
-            "thumbnail_base64": None,
-            "_index": 0,
-        },
-        {
-            "name": "Hands-On Workshop for Case Management Documentation Quality and Risk-Based Escalation Decisioning",
-            "description": "Interactive workshop focused on drafting robust case narratives, documenting rationale clearly, and improving escalation quality for complex multi-factor incidents.",
-            "link": "https://ecp.com/events/2002",
-            "thumbnail_base64": None,
-            "_index": 1,
-        },
-        {
-            "name": "Training Session on Investigative Interview Standards, Evidence Integrity, and Defensible Closure Reporting",
-            "description": "A scenario-rich program that provides practical methods for interview preparation, evidence chain handling, and producing closure reports that withstand review.",
-            "link": "https://ecp.com/events/2003",
-            "thumbnail_base64": None,
-            "_index": 2,
-        },
-        {
-            "name": "Panel Discussion on Internal Controls Optimization, Policy Usability, and Department-Wide Adoption Strategy",
-            "description": "Cross-team discussion around balancing control strength with operational usability, including examples of successful rollout playbooks and accountability models.",
-            "link": "https://ecp.com/events/2004",
-            "thumbnail_base64": None,
-            "_index": 3,
-        },
-        {
-            "name": "Knowledge Sharing Forum for Lessons Learned from Recent Audit Observations and Corrective Action Execution",
-            "description": "An extended knowledge forum to review recurring audit findings, strong remediation approaches, and methods to prevent repeat observations through durable ownership.",
-            "link": "https://ecp.com/events/2005",
-            "thumbnail_base64": None,
-            "_index": 4,
-        },
-    ]
-    return sample_knowledge_hub, sample_events
-
-
-def _with_card_index(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach gradient index for card styling without mutating original rows."""
-    out: list[dict[str, Any]] = []
-    for idx, item in enumerate(items):
-        row = dict(item)
-        row["_index"] = idx
-        out.append(row)
-    return out
 
 
 def _render_events_grid(cards: list[str]) -> str:
@@ -836,15 +784,18 @@ def _render_events_grid(cards: list[str]) -> str:
         left = cards[i]
         right = cards[i + 1] if i + 1 < len(cards) else ""
         right_cell = (
-            f'<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;">{right}</td>'
+            f'<td class="stack-col" valign="top" width="50%" '
+            f'style="width:50%; padding-left:8px; word-break:break-word; overflow-wrap:anywhere;">{right}</td>'
             if right
             else '<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;"></td>'
         )
         rows_html += (
             '<tr>'
-            '<td class="mobile-pad" style="padding:10px 40px 0 40px;">'
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
-            f'<td class="stack-col col-pad-right" valign="top" width="50%" style="width:50%; padding-right:8px;">{left}</td>'
+            '<td class="mobile-pad" style="padding:10px 20px 0 20px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            'style="table-layout:fixed;"><tr>'
+            f'<td class="stack-col col-pad-right" valign="top" width="50%" '
+            f'style="width:50%; padding-right:8px; word-break:break-word; overflow-wrap:anywhere;">{left}</td>'
             f'{right_cell}'
             '</tr></table></td></tr>'
         )
@@ -864,15 +815,18 @@ def _render_knowledge_grid(cards: list[str]) -> str:
         left = cards[i]
         right = cards[i + 1] if i + 1 < len(cards) else ""
         right_cell = (
-            f'<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;">{right}</td>'
+            f'<td class="stack-col" valign="top" width="50%" '
+            f'style="width:50%; padding-left:8px; word-break:break-word; overflow-wrap:anywhere;">{right}</td>'
             if right
             else '<td class="stack-col" valign="top" width="50%" style="width:50%; padding-left:8px;"></td>'
         )
         rows_html += (
             '<tr>'
-            '<td class="mobile-pad" style="padding:10px 40px 0 40px;">'
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
-            f'<td class="stack-col col-pad-right" valign="top" width="50%" style="width:50%; padding-right:8px;">{left}</td>'
+            '<td class="mobile-pad" style="padding:10px 20px 0 20px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            'style="table-layout:fixed;"><tr>'
+            f'<td class="stack-col col-pad-right" valign="top" width="50%" '
+            f'style="width:50%; padding-right:8px; word-break:break-word; overflow-wrap:anywhere;">{left}</td>'
             f'{right_cell}'
             '</tr></table></td></tr>'
         )
@@ -883,23 +837,15 @@ def build_weekly_digest_html(
     payload: dict[str, Any],
     *,
     banner_image_url: str | None = None,
-    use_sample_data: bool = True,
 ) -> str:
-    """
-    Build Outlook-safe HTML digest using the new full-width dark template.
+    """Build Outlook-safe HTML digest from the weekly payload."""
+    knowledge_hub = list(payload.get("knowledge_hub") or [])
+    events = list(payload.get("events") or [])
 
-    use_sample_data=True  -> demo cards (preview / local test)
-    use_sample_data=False -> real payload from DB
-    """
-    if use_sample_data:
-        knowledge_hub, events = _sample_digest_items()
-    else:
-        knowledge_hub = _with_card_index(list(payload.get("knowledge_hub") or []))
-        events = _with_card_index(list(payload.get("events") or []))
-
-    period_label = ""
-    if payload and payload.get("period"):
-        period_label = payload["period"].get("label", "")
+    period_label = _truncate_text(
+        payload["period"].get("label", "") if payload and payload.get("period") else "",
+        48,
+    )
 
     knowledge_cards = [_render_doc_card(item) for item in knowledge_hub]
     event_cards = [_render_event_card(item) for item in events]
@@ -932,18 +878,18 @@ td, th, div, p, a, h1, h2, h3 {{font-family: Arial, Helvetica, sans-serif;}}
 <style>
   body, table, td, a {{ -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }}
   table, td {{ mso-table-lspace: 0pt; mso-table-rspace: 0pt; }}
-  img {{ -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; }}
+  img {{ -ms-interpolation-mode: bicubic; border: 0; height: auto; line-height: 100%; outline: none; text-decoration: none; max-width: 100%; }}
   body {{ margin: 0; padding: 0; width: 100% !important; height: 100% !important; }}
   a {{ text-decoration: none; }}
   .arrow-link:hover {{ opacity: 0.7; }}
   .ev-card:hover, .kh-card:hover {{ box-shadow: 0 4px 16px rgba(0,50,120,0.15); }}
   @media screen and (max-width: 680px) {{
-    .email-wrapper {{ width: 100% !important; }}
+    .email-wrapper {{ width: 100% !important; max-width: 100% !important; }}
     .stack-col {{ display: block !important; width: 100% !important; max-width: 100% !important; }}
     .col-pad-right {{ padding-right: 0 !important; padding-bottom: 12px !important; }}
     .mobile-pad {{ padding-left: 16px !important; padding-right: 16px !important; }}
-    .banner-title {{ font-size: 26px !important; }}
-    .banner-cell {{ padding: 60px 20px 70px 20px !important; }}
+    .banner-title {{ font-size: 24px !important; line-height: 30px !important; }}
+    .banner-cell {{ padding: 36px 20px 40px 20px !important; }}
   }}
 </style>
 </head>
@@ -953,34 +899,28 @@ td, th, div, p, a, h1, h2, h3 {{font-family: Arial, Helvetica, sans-serif;}}
 Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
 </div>
 
-<!--[if mso]>
-<v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">
-<v:fill type="tile" color="#0B1D3A"/>
-</v:background>
-<![endif]-->
-
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; min-width:100%;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0B1D3A" style="width:100%; background-color:#0B1D3A;">
 <tr>
 <td align="center" valign="top" style="padding:0;">
 
-<table role="presentation" class="email-wrapper" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:100%;">
+<table role="presentation" class="email-wrapper" width="{EMAIL_MAX_WIDTH}" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:{EMAIL_MAX_WIDTH}px; min-width:0;">
 
 <!-- BANNER -->
 <tr>
-<td style="line-height:0; background-color:#0D2240;">
+<td bgcolor="#0D2240" style="background-color:#0D2240; line-height:0;">
 <!--[if mso]>
-<v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:100%; height:220px;">
+<v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:{EMAIL_MAX_WIDTH}px; height:140px;">
 <v:fill type="gradient" color="#0D2240" color2="#1A4080"/>
 <v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true">
 <![endif]-->
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(135deg, #0D2240 0%, #1A4A8A 50%, #2B6CB0 100%);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#1A4A8A" style="background-color:#1A4A8A;">
 <tr>
-<td class="banner-cell" align="center" style="padding:80px 40px 90px 40px;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0">
+<td class="banner-cell" align="center" bgcolor="#1A4A8A" style="padding:44px 24px 48px 24px; background-color:#1A4A8A;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
 <tr>
-<td align="center" style="font-family:Arial,Helvetica,sans-serif;">
-<span class="banner-title" style="display:block; font-size:34px; font-weight:bold; color:#ffffff; letter-spacing:1px; mso-line-height-rule:exactly; line-height:42px;">MSIL Compliance Weekly Digest</span>
-<span style="display:block; font-size:14px; color:#A8CCE8; margin-top:6px; letter-spacing:0.5px; mso-line-height-rule:exactly; line-height:20px;">Events &amp; Knowledge Hub updates &mdash; {escape(period_label) if period_label else "this week"}</span>
+<td align="center" style="font-family:Arial,Helvetica,sans-serif; {_TEXT_WRAP_STYLE}">
+<span class="banner-title" style="display:block; font-size:30px; font-weight:bold; color:#ffffff; letter-spacing:0.5px; mso-line-height-rule:exactly; line-height:36px; {_TEXT_WRAP_STYLE}">MSIL Compliance Weekly Digest</span>
+<span style="display:block; font-size:13px; color:#A8CCE8; margin-top:8px; letter-spacing:0.3px; mso-line-height-rule:exactly; line-height:18px; {_TEXT_WRAP_STYLE}">Events &amp; Knowledge Hub updates &mdash; {escape(period_label) if period_label else "this week"}</span>
 </td>
 </tr>
 </table>
@@ -996,7 +936,7 @@ Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbs
 
 <!-- EVENTS SECTION HEADING -->
 <tr>
-<td class="mobile-pad" style="padding:28px 40px 6px 40px;">
+<td class="mobile-pad" bgcolor="#0B1D3A" style="padding:24px 20px 6px 20px; background-color:#0B1D3A;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 <tr>
 <td style="padding-bottom:4px;">
@@ -1011,11 +951,11 @@ Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbs
 {events_grid}
 
 <!-- SPACER -->
-<tr><td style="padding:14px 0 0 0; font-size:1px; line-height:1px;">&nbsp;</td></tr>
+<tr><td bgcolor="#0B1D3A" style="padding:12px 0 0 0; font-size:1px; line-height:1px; background-color:#0B1D3A;">&nbsp;</td></tr>
 
 <!-- KNOWLEDGE HUB SECTION HEADING -->
 <tr>
-<td class="mobile-pad" style="padding:8px 40px 6px 40px;">
+<td class="mobile-pad" bgcolor="#0B1D3A" style="padding:8px 20px 6px 20px; background-color:#0B1D3A;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 <tr>
 <td style="padding-bottom:4px;">
@@ -1031,12 +971,12 @@ Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbs
 
 <!-- FOOTER -->
 <tr>
-<td style="padding:32px 40px 28px 40px;">
+<td class="mobile-pad" bgcolor="#0B1D3A" style="padding:24px 20px 28px 20px; background-color:#0B1D3A;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 <tr>
-<td style="border-top:1px solid rgba(255,255,255,0.15); padding-top:20px; font-family:Arial,Helvetica,sans-serif;">
+<td style="border-top:1px solid rgba(255,255,255,0.15); padding-top:20px; font-family:Arial,Helvetica,sans-serif; {_TEXT_WRAP_STYLE}">
 <span style="display:block; font-size:14px; color:#ffffff; padding-bottom:10px;">Regards,<br><strong>Compliance Team</strong></span>
-<span style="display:block; font-size:11px; line-height:18px; color:#6A8EAE;">
+<span style="display:block; font-size:11px; line-height:18px; color:#6A8EAE; {_TEXT_WRAP_STYLE}">
 This is a weekly digest sent to all employees. You are receiving this because you are part of the organization&rsquo;s distribution list.<br>
 MSIL Corporate Office, Compliance Division
 </span>
@@ -1061,7 +1001,6 @@ async def build_weekly_digest_email(
     reference_utc: datetime | None = None,
     base_url: str = "https://ecp.com",
     banner_image_url: str | None = None,
-    use_sample_data: bool = True,
 ) -> tuple[dict[str, Any], str]:
     payload = await build_weekly_digest_payload(
         db_config,
@@ -1071,6 +1010,5 @@ async def build_weekly_digest_email(
     html = build_weekly_digest_html(
         payload,
         banner_image_url=banner_image_url,
-        use_sample_data=use_sample_data,
     )
     return payload, html
