@@ -336,6 +336,25 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
     )
 
 
+async def get_active_document_detail_for_hub(
+    db: AsyncSession,
+    document_id: int,
+    user: CurrentUser,
+) -> DocumentOut:
+    """Hub detail: return only ACTIVE documents, hide draft/inactive."""
+    detail = await get_document_detail_for_revision(db, document_id)
+    if detail.status != DocumentStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    refs = set(detail.applicability_refs or [])
+    if detail.applicability_type == ApplicabilityType.DIVISION:
+        if not user.division_cluster or user.division_cluster not in refs:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    elif detail.applicability_type == ApplicabilityType.EMPLOYEE:
+        if not user.email or user.email not in refs:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return detail
+
+
 async def list_documents(
     db: AsyncSession,
     page: int = 1,

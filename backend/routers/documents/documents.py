@@ -210,6 +210,16 @@ async def document_hub(
     )
 
 
+@router.get("/hub/{document_id}", response_model=APIResponse)
+async def get_hub_document_detail(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    data = await document_service.get_active_document_detail_for_hub(db, document_id, user)
+    return APIResponse(message="Document fetched", status_code=200, status="success", data=data)
+
+
 def _linked_options_type_tokens(types: str | None, document_type: str | None) -> list[str]:
     if types is not None and types.strip():
         parsed = [p.strip() for p in types.split(",") if p.strip()]
