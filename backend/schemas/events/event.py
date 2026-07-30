@@ -120,6 +120,7 @@ class EventOut(BaseModel):
     version: Decimal
     revision: int
     status: EventStatus
+    published_at: ISTDateStrOptional = None
     applicability_type: ApplicabilityType
     applicability_refs: list[str] | None
     replaces_document_id: int | None = None

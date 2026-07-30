@@ -125,52 +125,63 @@ def _event_link(base_url: str, event_id: int) -> str:
 
 
 EMAIL_MAX_WIDTH = "100%"
-THUMBNAIL_MAX_W = 480
-THUMBNAIL_MAX_H = 270
+THUMBNAIL_MAX_W = 560
+THUMBNAIL_MAX_H = 420  # taller 4:3 crop — more height than 16:9
 THUMBNAIL_JPEG_QUALITY = 84
 CARD_INNER_PAD_V = 12
-EMAIL_CONTAINER_WIDTH = 720  # wider shell — uses more of the available window
+EMAIL_CONTAINER_WIDTH = 760  # wider shell so column images read larger
 
-CONTENT_H_PAD = "18px"
+CONTENT_H_PAD = "12px"
 
 # ---------------------------------------------------------------------------
-# Blue / "shining blue" theme tokens. A single synthesized shining-blue
-# background image sits behind the whole shell (attached inline, cid-referenced,
-# with a VML fallback for classic Outlook); cards are a light see-through
-# overlay so the one background reads through everywhere.
+# Full-bleed bg2.jpg behind the whole shell (inline CID + VML for classic
+# Outlook so the image covers the reading pane on window resize). Events /
+# Flyers sit directly on the bg (no card chrome); Policy cards stay frosted.
 # ---------------------------------------------------------------------------
-BODY_BG_COLOR = "#3f66c9"           # matches the bottom tone of the shining-blue bg image, so any overflow past the image blends seamlessly (no visible seam line)
-DIGEST_BG_CID = "digest-shine-bg"
-# Frosted glass cards for modern clients; solid ice-blue fallback for Outlook
-# (classic Outlook ignores backdrop-filter / rgba translucency reliably).
-CARD_BG = "rgba(234,242,255,0.72)"
-CARD_BG_MSO = "#eaf2ff"
+BODY_BG_COLOR = "#024579"           # matches bg2.jpg bottom tone (seamless overflow blend)
+DIGEST_BG_CID = "digest-wave-bg"
+DIGEST_BG_ASSET = "bg2.jpg"
+# Max edge for the attached bg JPEG (keeps message size reasonable).
+DIGEST_BG_MAX_EDGE = 1400
+DIGEST_BANNER_CID = "digest-wave-banner"
+DIGEST_BANNER_ASSET = "digest_wave_banner.png"
+DIGEST_BANNER_WIDTH = EMAIL_CONTAINER_WIDTH  # full shell width in Outlook
+# Frosted glass cards — soft periwinkle / indigo mist to match the shining-blue bg
+# (classic Outlook ignores backdrop-filter; solid fallbacks below).
+CARD_BG = "rgba(232,228,255,0.78)"
+CARD_BG_MSO = "#e8e4ff"
 CARD_BLUR = (
     "backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);"
 )
-CARD_BORDER = "rgba(147,197,253,0.95)"
-CARD_SHADOW = "0 8px 24px rgba(10,30,90,0.30)"
-CARD_ACCENT = "#2563eb"
-CARD_LABEL = "#0d1b3d"
-CARD_TEXT = "#1f2c4d"
-CARD_RADIUS = "50%"
-IMAGE_RADIUS = "50%"
+CARD_BORDER = "rgba(165,180,252,0.95)"
+CARD_SHADOW = "0 8px 24px rgba(49,46,129,0.28)"
+CARD_ACCENT = "#4f46e5"
+CARD_LABEL = "#1e1b4b"
+CARD_TEXT = "#312e81"
+CARD_RADIUS = "18px"
+IMAGE_RADIUS = "18px"
 # Soft tint behind image + frosted text pad (modern only).
-CARD_IMAGE_TINT = "rgba(191,219,254,0.55)"
-CARD_IMAGE_TINT_MSO = "#dbeafe"
-CARD_TEXT_BG = "rgba(255,255,255,0.55)"
-CARD_TEXT_BG_MSO = "#f5f9ff"
-SECTION_TITLE_COLOR = "#1d4ed8"
+CARD_IMAGE_TINT = "rgba(199,210,254,0.60)"
+CARD_IMAGE_TINT_MSO = "#c7d2fe"
+CARD_TEXT_BG = "rgba(245,243,255,0.70)"
+CARD_TEXT_BG_MSO = "#f5f3ff"
+SECTION_TITLE_COLOR = "#4338ca"
 COL_HEADER_COLOR = "#ffffff"
-COL_GAP = "14px"
+COL_GAP = "8px"
 CARD_GAP = "30px"
 IMAGE_GAP_V = "0"  # no padding around images — flush to card edges
-LINK_COLOR = "#2563eb"
+LINK_COLOR = "#4f46e5"
 ACCENT_CYAN = "#0891b2"
-ACCENT_VIOLET = "#6d28d9"
+ACCENT_VIOLET = "#7c3aed"
 
 HERO_TEXT = "#ffffff"
-HERO_SUBTEXT = "#dbe6ff"
+HERO_SUBTEXT = "#ffffff"
+# Event/flyer titles sit directly on the dark bg — white + shadow for contrast
+# in both light and dark client modes.
+SIMPLE_TITLE_COLOR = "#ffffff"
+SIMPLE_TITLE_SHADOW = (
+    "text-shadow:0 1px 3px rgba(0,0,0,0.9), 0 0 1px rgba(0,0,0,1);"
+)
 
 FOOTER_BG = "rgba(8,20,64,0.55)"
 FOOTER_TEXT = "#ffffff"
@@ -222,64 +233,82 @@ def _inline_png_attachment(content_id: str, png_bytes: bytes, filename: str) -> 
     }
 
 
-def _email_shine_bg_bytes() -> bytes:
-    """Single shining-blue gradient background for the whole email (Outlook-safe JPEG).
+def _browser_html_from_email(
+    html_content: str,
+    inline_attachments: list[dict[str, str]] | None = None,
+) -> str:
+    """Replace cid: image refs with data URIs so the .html opens correctly in a browser."""
+    out = html_content
+    for att in inline_attachments or []:
+        cid = (att.get("contentId") or "").strip()
+        b64 = att.get("contentInBase64") or ""
+        ctype = att.get("contentType") or "image/jpeg"
+        if not cid or not b64:
+            continue
+        out = out.replace(f"cid:{cid}", f"data:{ctype};base64,{b64}")
+    return out
 
-    Synthesized (not a photo) so the whole page background stays one consistent
-    blue tone with a soft diagonal "shine"/glossy highlight. This is the ONE
-    image used as the email background — rendered once, not tiled.
+
+def _html_file_attachment(
+    html_content: str,
+    *,
+    filename: str = "MSIL-Weekly-Digest.html",
+) -> dict[str, str]:
+    """Regular downloadable .html attachment (no contentId → ACS treats as file, not inline)."""
+    return {
+        "name": filename,
+        "contentType": "text/html",
+        "contentInBase64": base64.b64encode(
+            html_content.encode("utf-8")
+        ).decode("ascii"),
+    }
+
+
+def _email_bg_bytes() -> bytes:
+    """Load bg2.jpg as the full-bleed email background (Outlook-safe JPEG).
+
+    Downscales the asset so the inline attachment stays small enough for ACS
+    while remaining sharp on a typical reading pane. Fallback color is
+    BODY_BG_COLOR (bottom tone of the image).
     """
-    from PIL import Image, ImageDraw, ImageFilter
+    from PIL import Image
 
-    # Tall enough to cover virtually any digest length; the bottom color matches
-    # BODY_BG_COLOR exactly so if content ever runs past the image there is no
-    # visible seam/line where the image ends and the fallback color begins.
-    width, height = EMAIL_CONTAINER_WIDTH, 2600
-    top_color = (13, 33, 99)        # deep shining blue
-    mid_color = (30, 74, 209)       # vivid blue
-    bottom_color = (63, 102, 201)   # = BODY_BG_COLOR #3f66c9
-
-    gradient_col = Image.new("RGB", (1, height))
-    for y in range(height):
-        t = y / (height - 1)
-        if t < 0.55:
-            local_t = t / 0.55
-            start, end = top_color, mid_color
-        else:
-            local_t = (t - 0.55) / 0.45
-            start, end = mid_color, bottom_color
-        pixel = tuple(int(start[i] + (end[i] - start[i]) * local_t) for i in range(3))
-        gradient_col.putpixel((0, y), pixel)
-    img = gradient_col.resize((width, height), Image.BILINEAR)
-
-    # A single soft diagonal glossy sweep (one streak, not two) so it doesn't
-    # read as separate/competing highlights.
-    shine_mask = Image.new("L", (width, height), 0)
-    shine_draw = ImageDraw.Draw(shine_mask)
-    shine_draw.polygon([(-200, 0), (int(width * 0.75), 0), (int(width * 0.35), height), (-560, height)], fill=130)
-    shine_mask = shine_mask.filter(ImageFilter.GaussianBlur(radius=160))
-    white_layer = Image.new("RGB", (width, height), (255, 255, 255))
-    img = Image.composite(white_layer, img, shine_mask)
-
-    img = img.filter(ImageFilter.GaussianBlur(radius=3))
-
+    path = _ASSETS_DIR / DIGEST_BG_ASSET
+    img = Image.open(path).convert("RGB")
+    img.thumbnail((DIGEST_BG_MAX_EDGE, DIGEST_BG_MAX_EDGE * 2), Image.LANCZOS)
     buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=92, optimize=True)
+    img.save(buffer, format="JPEG", quality=82, optimize=True)
     return buffer.getvalue()
 
 
 def _digest_bg_inline_attachment() -> dict[str, str]:
-    return _inline_attachment(DIGEST_BG_CID, _email_shine_bg_bytes())
+    return _inline_attachment(DIGEST_BG_CID, _email_bg_bytes())
+
+
+def _email_banner_bytes() -> bytes:
+    """Load digest_wave_banner.png for the top-of-email banner."""
+    path = _ASSETS_DIR / DIGEST_BANNER_ASSET
+    return path.read_bytes()
+
+
+def _digest_banner_inline_attachment() -> dict[str, str]:
+    return _inline_png_attachment(
+        DIGEST_BANNER_CID,
+        _email_banner_bytes(),
+        DIGEST_BANNER_ASSET,
+    )
 
 
 def _ensure_digest_static_attachments(
     inline_attachments: list[dict[str, str]],
 ) -> list[dict[str, str]]:
-    """Append the single bundled shining-blue background image."""
+    """Append bundled bg2.jpg background + wave banner image."""
     attachments = list(inline_attachments)
     existing = {att.get("contentId") for att in attachments}
     if DIGEST_BG_CID not in existing:
         attachments.append(_digest_bg_inline_attachment())
+    if DIGEST_BANNER_CID not in existing:
+        attachments.append(_digest_banner_inline_attachment())
     return attachments
 
 
@@ -355,7 +384,7 @@ def _fetch_blob_bytes_from_azure(blob_path: str) -> bytes | None:
 
 
 def _compress_image_to_jpeg_bytes(image_bytes: bytes) -> bytes:
-    """Resize/crop to a clean 16:9 landscape JPEG that fits its card.
+    """Resize/crop to a clean 4:3 landscape JPEG that fits its card.
 
     Corners are rounded purely via CSS (border-radius) on the <img> tag rather
     than baked into the JPEG.
@@ -366,7 +395,7 @@ def _compress_image_to_jpeg_bytes(image_bytes: bytes) -> bytes:
     img = img.convert("RGB")
 
     w, h = img.size
-    target_ratio = 16 / 9
+    target_ratio = THUMBNAIL_MAX_W / THUMBNAIL_MAX_H  # 4:3 — wider + taller cards
     current_ratio = w / h
 
     if current_ratio > target_ratio:
@@ -795,6 +824,11 @@ def build_and_send_weekly_digest_sync(
         payload,
         banner_image_url=banner_image_url,
     )
+    inline = list(payload.get("inline_attachments") or [])
+    # Downloadable .html only (plus existing inline images for the email body).
+    # CID refs are inlined as data URIs so the file opens correctly in a browser.
+    browser_html = _browser_html_from_email(html, inline)
+    attachments = inline + [_html_file_attachment(browser_html)]
     send_result = send_html_email_via_acs(
         connection_string=connection_string,
         sender_address=sender_address,
@@ -803,10 +837,11 @@ def build_and_send_weekly_digest_sync(
         bcc_addresses=bcc_addresses,
         subject=subject,
         html_content=html,
-        inline_attachments=list(payload.get("inline_attachments") or []),
+        inline_attachments=attachments,
         plain_text=(
             "Weekly Knowledge Hub and Events digest is available. "
-            "Please review the latest highlights."
+            "Please review the latest highlights. "
+            "An HTML copy is attached for viewing in a browser."
         ),
     )
     return {
@@ -909,7 +944,7 @@ def _build_columns_context(
         },
         {
             "key": "policy",
-            "header": "Policy &amp; Others",
+            "header": "Policy & Others",
             "cards": [_prepare_detail_card_item(i) for i in policy_others],
             "card_type": "detail",
             "accent": ACCENT_VIOLET,
@@ -931,10 +966,11 @@ def _build_columns_context(
 # Single Jinja2 template (jinja2.Template) for the whole digest email. Python only
 # computes/prepares context data above; all markup composition lives in this template.
 #
-# Design: one synthesized shining-blue background image behind the whole shell
-# (VML fallback keeps it working in classic Outlook), a tall gradient-topped
-# hero banner, generous gaps, larger 16:9 imagery, and every column ending in
-# a "View all" link. The shell is wider (720px) so there's less dead space on
+# Design: bg2.jpg full-bleed behind the whole shell (CSS cover + VML
+# aspect=atleast so classic Outlook covers the reading pane on resize), a
+# transparent hero (white text on the image), Events/Flyers as bare image +
+# white title (no card chrome), frosted Policy cards, and every column ending
+# in a "View all" link. The shell is wider (760px) so there's less dead space on
 # large windows, while still shrinking fluidly on small ones.
 _DIGEST_EMAIL_TEMPLATE_SRC = """
 {#-
@@ -963,26 +999,19 @@ _DIGEST_EMAIL_TEMPLATE_SRC = """
 {%- else %}
 <td align="center" style="line-height:0; font-size:0; padding:0;">
 <a href="{{ link }}" target="_blank" style="display:block; text-decoration:none; border:0; line-height:0;">
-<img class="card-img" src="cid:{{ thumbnail_cid }}" alt="{{ alt_text }}" width="480" border="0" style="display:block; width:100%; max-width:100%; height:auto; min-height:160px; aspect-ratio:16/9; border:0; border-radius:{{ image_radius }}; object-fit:cover;">
+<img class="card-img" src="cid:{{ thumbnail_cid }}" alt="{{ alt_text }}" width="560" border="0" style="display:block; width:100%; max-width:100%; height:auto; min-height:210px; aspect-ratio:4/3; border:0; border-radius:{{ image_radius }}; object-fit:cover;">
 </a>
 </td>
 {%- endif %}
 {%- endmacro -%}
 
 {%- macro simple_card(card, is_mso) -%}
-{%- if is_mso %}
-<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" bgcolor="{{ card_bg_mso }}" style="border-collapse:collapse; border:1px solid {{ card_border_mso }}; background-color:{{ card_bg_mso }};">
-{%- else %}
-<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="background-color:{{ card_bg }}; {{ card_blur }} border:1px solid {{ card_border }}; border-radius:{{ card_radius }}; overflow:hidden; box-shadow:{{ card_shadow }}; border-collapse:separate; margin-bottom:{{ card_gap }};">
-{%- endif %}
+{#- No card chrome — thumbnail + white title sit directly on the page bg. -#}
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="border-collapse:collapse; background-color:transparent;{% if not is_mso %} margin-bottom:{{ card_gap }};{% endif %}">
 {%- if card.thumbnail_cid %}<tr>{{ card_image(card.thumbnail_cid, card.name, card.link, is_mso) }}</tr>{% endif -%}
 <tr>
-{%- if is_mso %}
-<td bgcolor="{{ card_text_bg_mso }}" style="padding:10px 14px 12px 14px; background-color:{{ card_text_bg_mso }}; font-family:{{ font_body }}; font-size:14px; line-height:19px; font-weight:700; color:{{ card_label }}; {{ text_wrap }}">
-{%- else %}
-<td style="padding:10px 14px 12px 14px; background-color:{{ card_text_bg }}; {{ card_blur }} font-family:{{ font_body }}; font-size:14px; line-height:19px; font-weight:700; color:{{ card_label }}; {{ text_wrap }}">
-{%- endif %}
-<a href="{{ card.link }}" target="_blank" style="text-decoration:none; color:{{ card_label }}; font-weight:700;">{{ card.name }}</a>
+<td class="force-light-text" style="padding:10px 4px 12px 4px; background-color:transparent; font-family:{{ font_body }}; font-size:14px; line-height:19px; font-weight:700; color:{{ simple_title }}; {{ simple_title_shadow }} {{ text_wrap }}">
+<a class="force-light-text" href="{{ card.link }}" target="_blank" style="text-decoration:none; color:{{ simple_title }}; font-weight:700; {{ simple_title_shadow }}">{{ card.name }}</a>
 </td></tr>
 </table>
 {{ card_spacer(is_mso) }}
@@ -1048,24 +1077,33 @@ _DIGEST_EMAIL_TEMPLATE_SRC = """
 </table>
 {%- endmacro -%}
 
-{%- macro hero_banner() -%}
+{%- macro wave_banner() -%}
 <tr>
-<td align="center" bgcolor="#0f2f8f" style="padding:0; margin:0; width:100%; background-color:#0f2f8f;">
+<td align="center" style="padding:0; margin:0; width:100%; line-height:0; font-size:0; background-color:transparent;">
+<img class="wave-banner" src="cid:{{ banner_cid }}" width="{{ banner_w }}" alt="MSIL Compliance Weekly Digest" border="0" style="display:block; width:100%; max-width:100%; height:auto; border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic;">
+</td>
+</tr>
+{%- endmacro -%}
+
+{%- macro hero_banner() -%}
+{{ wave_banner() }}
+<tr>
+<td align="center" style="padding:0; margin:0; width:100%; background-color:transparent;">
 <!--[if mso]>
-<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" bgcolor="#0f2f8f" style="background-color:#0f2f8f;"><tr><td style="padding:68px 30px 62px 30px;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="background-color:transparent;"><tr><td style="padding:36px 30px 40px 30px;">
 <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
-<tr><td align="center" style="padding:0 0 12px 0; font-family:{{ font_display }}; font-size:30px; line-height:36px; font-weight:700; color:{{ hero_text }};">MSIL Compliance Weekly Digest</td></tr>
-<tr><td align="center" style="padding:0 0 8px 0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }};">Events &amp; Knowledge Hub updates</td></tr>
-<tr><td align="center" style="padding:0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }};">{{ period_display }}</td></tr>
+<tr><td align="center" class="force-light-text" style="padding:0 0 12px 0; font-family:{{ font_display }}; font-size:30px; line-height:36px; font-weight:700; color:{{ hero_text }}; {{ simple_title_shadow }}">MSIL Compliance Weekly Digest</td></tr>
+<tr><td align="center" class="force-light-text" style="padding:0 0 8px 0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }}; {{ simple_title_shadow }}">Events &amp; Knowledge Hub updates</td></tr>
+<tr><td align="center" class="force-light-text" style="padding:0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }}; {{ simple_title_shadow }}">{{ period_display }}</td></tr>
 </table>
 </td></tr></table>
 <![endif]-->
 <!--[if !mso]><!-->
-<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"><tr><td style="padding:68px 30px 62px 30px;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"><tr><td style="padding:36px 30px 40px 30px; background-color:transparent;">
 <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
-<tr><td align="center" style="padding:0 0 12px 0; font-family:{{ font_display }}; font-size:30px; line-height:36px; font-weight:700; color:{{ hero_text }}; letter-spacing:0.2px; mso-line-height-rule:exactly; {{ text_wrap }}">MSIL Compliance Weekly Digest</td></tr>
-<tr><td align="center" style="padding:0 0 8px 0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }}; mso-line-height-rule:exactly; {{ text_wrap }}">Events &amp; Knowledge Hub updates</td></tr>
-<tr><td align="center" style="padding:0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }}; mso-line-height-rule:exactly; {{ text_wrap }}">{{ period_display }}</td></tr>
+<tr><td align="center" class="force-light-text hero-title" style="padding:0 0 12px 0; font-family:{{ font_display }}; font-size:30px; line-height:36px; font-weight:700; color:{{ hero_text }}; letter-spacing:0.2px; mso-line-height-rule:exactly; {{ simple_title_shadow }} {{ text_wrap }}">MSIL Compliance Weekly Digest</td></tr>
+<tr><td align="center" class="force-light-text" style="padding:0 0 8px 0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }}; mso-line-height-rule:exactly; {{ simple_title_shadow }} {{ text_wrap }}">Events &amp; Knowledge Hub updates</td></tr>
+<tr><td align="center" class="force-light-text" style="padding:0; font-family:{{ font_body }}; font-size:14px; line-height:20px; color:{{ hero_subtext }}; mso-line-height-rule:exactly; {{ simple_title_shadow }} {{ text_wrap }}">{{ period_display }}</td></tr>
 </table>
 </td></tr></table>
 <!--<![endif]-->
@@ -1080,8 +1118,8 @@ _DIGEST_EMAIL_TEMPLATE_SRC = """
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="x-apple-disable-message-reformatting">
-<meta name="color-scheme" content="light">
-<meta name="supported-color-schemes" content="light">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light only">
 <title>MSIL Compliance Weekly Digest</title>
 <!--[if mso]>
 <noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript>
@@ -1091,6 +1129,7 @@ td, th, div, p, a, h1, h2, h3 {font-family: Calibri, Segoe UI, Arial, Helvetica,
 </style>
 <![endif]-->
 <style>
+:root { color-scheme: light only; }
 html, body { width: 100% !important; max-width: 100% !important; overflow-x: hidden !important; margin: 0 !important; padding: 0 !important; }
 body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
 table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
@@ -1100,7 +1139,19 @@ a { text-decoration: none; }
 .email-outer { width: 100% !important; max-width: 100% !important; table-layout: fixed !important; }
 .email-wrapper, .content-shell { width: 100% !important; max-width: {{ cw }}px !important; table-layout: fixed !important; }
 .card-img { width: 100% !important; max-width: 100% !important; height: auto !important; display: block !important; }
+.wave-banner { width: 100% !important; max-width: 100% !important; height: auto !important; display: block !important; }
 .stack-col { overflow: hidden !important; word-wrap: break-word !important; vertical-align: top !important; width: 33.33% !important; }
+.force-light-text, .force-light-text a {
+  color: {{ simple_title }} !important;
+  -webkit-text-fill-color: {{ simple_title }} !important;
+}
+/* Keep titles readable if a client still applies dark-mode inversion */
+@media (prefers-color-scheme: dark) {
+  .force-light-text, .force-light-text a {
+    color: {{ simple_title }} !important;
+    -webkit-text-fill-color: {{ simple_title }} !important;
+  }
+}
 /* Fluid hybrid: shrink with reading pane without relying on @media alone */
 @media only screen and (max-width: 720px) {
   .outer-pad { padding-left: 8px !important; padding-right: 8px !important; }
@@ -1111,11 +1162,13 @@ a { text-decoration: none; }
 </style>
 </head>
 <body bgcolor="{{ body_bg }}" style="margin:0; padding:0; width:100%; max-width:100%; overflow-x:hidden; -webkit-font-smoothing:antialiased; background-color:{{ body_bg }}; background-image:url(cid:{{ bg_cid }}); background-repeat:no-repeat; background-position:center top; background-size:cover;">
-{#- Outlook desktop's VML v:background frame/tile fill is unreliable (it can
-   visibly repeat/seam the image), so classic Outlook intentionally gets the
-   solid {{ body_bg }} bgcolor only — no image there. Every other client
-   (Gmail, Apple Mail, new Outlook, web) renders the real background-image
-   above via CSS. -#}
+{#- Classic Outlook: VML v:background with aspect=atleast ≈ CSS background-size:cover
+   so the image fills the reading pane when the user resizes the window. -#}
+<!--[if gte mso 9]>
+<v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">
+<v:fill type="frame" aspect="atleast" src="cid:{{ bg_cid }}" color="{{ body_bg }}" />
+</v:background>
+<![endif]-->
 <div style="display:none; max-height:0; overflow:hidden; mso-hide:all; font-size:1px; line-height:1px; color:{{ body_bg }};">Your Weekly Digest: Events &amp; Knowledge Hub updates from MSIL Compliance.&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
 <table role="presentation" class="email-outer" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:100%; table-layout:fixed; margin:0; padding:0; background-color:transparent;">
 <tr><td class="outer-pad" align="center" valign="top" width="100%" style="padding:26px 12px; margin:0; width:100%;">
@@ -1183,9 +1236,9 @@ def build_weekly_digest_html(
 
     Rendering is done via a single compiled jinja2.Template (_DIGEST_EMAIL_TEMPLATE);
     this function only prepares/aggregates the context data passed to it. The
-    email background is the single synthesized shining-blue image attached as
-    `inline_attachments` (see `_ensure_digest_static_attachments`); `banner_image_url`
-    is accepted for backward compatibility but is currently unused.
+    email background is bg2.jpg and the top wave banner is digest_wave_banner.png,
+    both attached as `inline_attachments` (see `_ensure_digest_static_attachments`);
+    `banner_image_url` is accepted for backward compatibility but is currently unused.
     """
     events = list(payload.get("events") or [])[:MAX_COLUMN_ITEMS]
     flyers = list(payload.get("flyers") or [])[:MAX_COLUMN_ITEMS]
@@ -1212,14 +1265,18 @@ def build_weekly_digest_html(
         col_gap=COL_GAP,
         body_bg=BODY_BG_COLOR,
         bg_cid=DIGEST_BG_CID,
+        banner_cid=DIGEST_BANNER_CID,
+        banner_w=DIGEST_BANNER_WIDTH,
         hero_text=HERO_TEXT,
         hero_subtext=HERO_SUBTEXT,
+        simple_title=SIMPLE_TITLE_COLOR,
+        simple_title_shadow=SIMPLE_TITLE_SHADOW,
         footer_bg=FOOTER_BG,
         footer_text=FOOTER_TEXT,
         footer_subtext=FOOTER_SUBTEXT,
         card_bg=CARD_BG,
         card_bg_mso=CARD_BG_MSO,
-        card_border_mso="#bcd2f7",
+        card_border_mso="#c7d2fe",
         card_blur=CARD_BLUR,
         card_border=CARD_BORDER,
         card_radius=CARD_RADIUS,
@@ -1240,7 +1297,7 @@ def build_weekly_digest_html(
         card_gap=CARD_GAP,
         text_wrap=_TEXT_WRAP_STYLE,
         mso_thumb_w=mso_thumb_w,
-        mso_thumb_h=int(round(mso_thumb_w * 9 / 16)),
+        mso_thumb_h=int(round(mso_thumb_w * 3 / 4)),
     )
 
 

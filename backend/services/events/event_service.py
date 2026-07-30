@@ -210,6 +210,7 @@ async def get_event_detail_for_revision(db: AsyncSession, event_id: int) -> Even
         version=event.version,
         revision=event.revision,
         status=event.status,
+        published_at=event.published_at,
         applicability_type=event.applicability_type,
         applicability_refs=event.applicability_refs,
         replaces_document_id=event.replaces_document_id,
@@ -256,6 +257,7 @@ def build_event_out(
         version=event.version,
         revision=event.revision,
         status=event.status,
+        published_at=event.published_at,
         applicability_type=event.applicability_type,
         applicability_refs=event.applicability_refs,
         replaces_document_id=event.replaces_document_id,
@@ -599,6 +601,8 @@ async def _upsert_draft_revision(db: AsyncSession, draft: Event) -> None:
 
 async def _publish_event(db: AsyncSession, event: Event) -> None:
     last_rev = await _get_latest_revision(db, event.id)
+    if event.published_at is None and last_rev is None:
+        event.published_at = ist_now()
     if last_rev:
         metadata_changed = (
             _names_changed_vs_revision(event, last_rev)
@@ -656,6 +660,7 @@ async def _publish_draft(db: AsyncSession, draft: Event) -> Event:
         draft.revision = parent.revision + 1
     else:
         draft.revision = parent.revision
+    draft.published_at = parent.published_at
 
     published_file_ids = list(draft.staging_file_ids or [])
 

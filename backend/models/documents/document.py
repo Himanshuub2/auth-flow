@@ -154,6 +154,7 @@ class Document(BaseDocuments):
         Enum(DocumentStatus, name="document_status", schema=SCHEMA, create_constraint=True),
         default=DocumentStatus.DRAFT,
     )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False, server_default="1")
 

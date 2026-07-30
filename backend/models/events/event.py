@@ -48,6 +48,7 @@ class Event(BaseEvents):
         Enum(EventStatus, name="event_status", schema=SCHEMA, create_constraint=True),
         default=EventStatus.DRAFT,
     )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     applicability_type: Mapped[ApplicabilityType] = mapped_column(
         Enum(ApplicabilityType, name="applicability_type", schema=SCHEMA, create_constraint=True),

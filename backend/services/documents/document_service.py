@@ -315,6 +315,7 @@ async def get_document_detail_for_revision(db: AsyncSession, document_id: int) -
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
         status=doc.status,
+        published_at=doc.published_at,
         version=doc.version,
         revision=doc.revision,
         change_remarks=doc.change_remarks,
@@ -1167,6 +1168,7 @@ def build_document_out(
         applicability_type=doc.applicability_type,
         applicability_refs=doc.applicability_refs,
         status=doc.status,
+        published_at=doc.published_at,
         revision=doc.revision,
         change_remarks=doc.change_remarks,
         deactivate_remarks=doc.deactivate_remarks,
@@ -1528,6 +1530,8 @@ async def _upsert_draft_revision(db: AsyncSession, draft: Document) -> None:
 
 async def _publish_document(db: AsyncSession, doc: Document) -> None:
     last_rev = await _get_latest_revision(db, doc.id)
+    if doc.published_at is None and last_rev is None:
+        doc.published_at = ist_now()
     if last_rev:
         metadata_changed = _metadata_changed_vs_revision(doc, last_rev)
         files_changed = await _staging_files_differ_from_revision(db, doc, last_rev)
@@ -1583,6 +1587,7 @@ async def _absorb_and_publish(db: AsyncSession, successor: Document, parent: Doc
         successor.revision = parent.revision + 1
     else:
         successor.revision = parent.revision
+    successor.published_at = parent.published_at
 
     published_file_ids = list(successor.staging_file_ids or [])
 

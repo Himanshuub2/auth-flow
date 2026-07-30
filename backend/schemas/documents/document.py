@@ -111,6 +111,7 @@ class DocumentOut(BaseModel):
     applicability_type: ApplicabilityType
     applicability_refs: list[str] | None
     status: DocumentStatus
+    published_at: ISTDateStrOptional = None
     version: Decimal
     revision: int
     change_remarks: str | None
