@@ -91,6 +91,42 @@ def _check_type_permission(user: CurrentUser, doc_type: DocumentType) -> None:
         )
 
 
+async def _validate_employee_applicability_emails(
+    db: AsyncSession,
+    applicability_type: ApplicabilityType,
+    applicability_refs: list[str] | None,
+) -> None:
+    if applicability_type != ApplicabilityType.EMPLOYEE or not applicability_refs:
+        return
+
+    normalized_refs = {
+        email.strip().lower()
+        for email in applicability_refs
+        if isinstance(email, str) and email.strip()
+    }
+    if not normalized_refs:
+        return
+
+    result = await db.execute(
+        select(func.lower(User.email)).where(func.lower(User.email).in_(normalized_refs))
+    )
+    valid_emails = set(result.scalars().all())
+    invalid_emails = sorted(
+        {
+            email.strip()
+            for email in applicability_refs
+            if isinstance(email, str)
+            and email.strip()
+            and email.strip().lower() not in valid_emails
+        }
+    )
+    if invalid_emails:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid email id: {', '.join(invalid_emails)}",
+        )
+
+
 
 async def save_document(
     db: AsyncSession,
@@ -106,6 +142,11 @@ async def save_document(
         payload.applicability_type,
         payload.applicability_refs,
         allow_division=False,
+    )
+    await _validate_employee_applicability_emails(
+        db,
+        payload.applicability_type,
+        payload.applicability_refs,
     )
 
     parent_to_draft_id: dict[int, int] = {}
